@@ -534,6 +534,25 @@ extension ConstructedTask {
             try builder.addSubprocessCommand(self, inputs: inputs, outputs: outputs, description: ruleInfo, commandLine: commandLine, environment: environment, workingDirectory: execTask.workingDirectory, allowMissingInputs: allowMissingInputs, alwaysOutOfDate: alwaysExecuteTask, deps: execTask.dependencyData, isUnsafeToInterrupt: type.isUnsafeToInterrupt, llbuildControlDisabled: execTask.llbuildControlDisabled)
         }
     }
+
+    /// The environment this task will hand llbuild as its command's environment, or
+    /// `nil` if it takes a path through `addToDescription` that has none.
+    ///
+    /// `EnvironmentBaseTable` is built from these before any command is described,
+    /// so this has to agree with the routing above: an environment collected here
+    /// that never reaches a command leaves an unreferenced base in the manifest, and
+    /// one that reaches a command without being collected is merely sent inline.
+    /// Kept next to `addToDescription` so the two are read, and changed, together.
+    var environmentToDescribe: EnvironmentBindings? {
+        // FIXME: This cast is unfortunate.
+        guard (execTask as! Task).action == nil else { return nil }
+        switch ruleInfo[0] {
+        case "MkDir", "SymLink":
+            return nil
+        default:
+            return environment
+        }
+    }
 }
 
 public enum RequiredTargetDependencyReason: CustomStringConvertible {
