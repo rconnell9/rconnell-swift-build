@@ -158,4 +158,6 @@ public enum SWBFeatureFlag {
     public static let enableCacheMetricsLogs = SWBFeatureFlagProperty("EnableCacheMetricsLogs", defaultValue: false)
 
     public static let enableAppSandboxConflictingValuesEmitsWarning = SWBFeatureFlagProperty("AppSandboxConflictingValuesEmitsWarning", defaultValue: true)
+
+    public static let useInMemoryLLBuildDescription = SWBFeatureFlagProperty("UseInMemoryLLBuildDescription", defaultValue: false)
 }

@@ -110,6 +110,14 @@ package struct BuildDescriptionSignatureComponents: Codable, Hashable, Sendable 
 /// These change across terminal/shell sessions but don't affect build output
 /// and including them can invalidate the on-disk cache for cosmetic differences.
 fileprivate let environmentDenylist: Set<String> = [
+    // Not shell noise, but exempt for the same reason: a feature flag, which
+    // `SWBFeatureFlagProperty` reads from an environment variable of this name.
+    // Unlike most feature flags it changes nothing about what task construction
+    // produces -- only how the finished description is handed to llbuild -- so a
+    // description planned with it set is interchangeable with one planned without
+    // it, and toggling it should not force a re-plan.
+    "UseInMemoryLLBuildDescription",
+
     "Apple_PubSub_Socket_Render",
     "ITERM_SESSION_ID",
     "LC_TERMINAL",          // iTerm-specific, not a real locale category

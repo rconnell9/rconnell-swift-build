@@ -562,6 +562,16 @@ package final class BuildOperation: BuildSystemOperation {
         default: llbQoS = nil
         }
 
+        let descriptionSource: SWBLLBuild.BuildSystem.DescriptionSource
+        if SWBFeatureFlag.useInMemoryLLBuildDescription.value {
+            let buildDescription = self.buildDescription
+            descriptionSource = .inMemory(originName: buildDescription.manifestPath.str) { builder in
+                buildDescription.populateLLBuildDescription(builder: builder)
+            }
+        } else {
+            descriptionSource = .buildFile(buildDescription.manifestPath.str)
+        }
+
         if let entry {
             // If the entry is valid, reuse it.
             if let cachedAdaptor = entry.adaptor, entry.environment == buildEnvironment, entry.buildDescription! === buildDescription, entry.llbQoS == llbQoS, entry.laneWidth == laneWidth {
@@ -575,7 +585,7 @@ package final class BuildOperation: BuildSystemOperation {
                 entry.llbQoS = llbQoS
                 entry.laneWidth = laneWidth
                 entry.fileSystemMode = fs.fileSystemMode
-                entry.system = SWBLLBuild.BuildSystem(buildFile: buildDescription.manifestPath.str, databaseFile: dbPath.str, delegate: adaptor, environment: buildEnvironment, serial: serial, traceFile: traceFile?.str, schedulerAlgorithm: algorithm, schedulerLanes: laneWidth, qos: llbQoS)
+                entry.system = SWBLLBuild.BuildSystem(description: descriptionSource, databaseFile: dbPath.str, delegate: adaptor, environment: buildEnvironment, serial: serial, traceFile: traceFile?.str, schedulerAlgorithm: algorithm, schedulerLanes: laneWidth, qos: llbQoS)
             }
             system = entry.system!
         } else {
@@ -588,7 +598,7 @@ package final class BuildOperation: BuildSystemOperation {
                     assertionFailure("A previous build is still running: \(system)")
                 }
             }
-            system = SWBLLBuild.BuildSystem(buildFile: buildDescription.manifestPath.str, databaseFile: dbPath.str, delegate: adaptor, environment: buildEnvironment, serial: serial, traceFile: traceFile?.str, schedulerAlgorithm: algorithm, schedulerLanes: laneWidth, qos: llbQoS)
+            system = SWBLLBuild.BuildSystem(description: descriptionSource, databaseFile: dbPath.str, delegate: adaptor, environment: buildEnvironment, serial: serial, traceFile: traceFile?.str, schedulerAlgorithm: algorithm, schedulerLanes: laneWidth, qos: llbQoS)
         }
 
         // FIXME: This API is not thread safe, and we can't fix the concurrency issues outside of llbuild itself.
@@ -615,6 +625,23 @@ package final class BuildOperation: BuildSystemOperation {
             }
             // FIXME: There is a race here, we might install the system after we receive the cancellation, but before the low-level build starts.
             if isCancelled {
+                result = false
+            } else if !(await _Concurrency.Task.detachNewThread(name: "llb_buildsystem_initialize") { system.initialize() }) {
+                // The build entry points below call `initialize()` themselves, but
+                // doing it here means a description that cannot be loaded fails
+                // exactly once: a failed in-memory populate leaves llbuild with no
+                // description and no callback to retry with, so the per-node loops
+                // would each re-enter `initialize()` and pile a spurious build-file
+                // error on top of the real one. It also keeps the load out of the
+                // first node build, where it would be billed to that node.
+                //
+                // Ordered after the system is installed above so that a cancellation
+                // arriving first reaches llbuild, which then declines to load the
+                // description at all. A cancellation arriving mid-load cannot
+                // interrupt it -- llbuild holds its state lock across the load -- but
+                // that is equally true of the load the first `build()` would do.
+                //
+                // A failed initialize has already reported why through the delegate.
                 result = false
             } else {
                 if let buildOnlyTheseOutputs = buildOutputMap?.keys {

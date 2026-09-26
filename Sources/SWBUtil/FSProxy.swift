@@ -130,6 +130,15 @@ public enum FileSystemMode: Sendable {
         case .fullStat: return "default"
         }
     }
+
+    public init?(manifestLabel: String) {
+        switch manifestLabel {
+        case "checksum-only": self = .checksumOnly
+        case "device-agnostic": self = .deviceAgnostic
+        case "default": self = .fullStat
+        default: return nil
+        }
+    }
 }
 
 /// Abstracted access to file system operations.

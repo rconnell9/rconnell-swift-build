@@ -1031,6 +1031,7 @@ fileprivate extension BuildDescription {
             }
         }
 
-        return managerFS.exists(dir) && managerFS.exists(manifestPath)
+        guard managerFS.exists(dir) else { return false }
+        return SWBFeatureFlag.useInMemoryLLBuildDescription.value || managerFS.exists(manifestPath)
     }
 }

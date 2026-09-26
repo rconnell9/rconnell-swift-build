@@ -140,6 +140,13 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
     // rdar://107734664 (Consider passing the task store as a parameter to build description methods rather than as a property of BuildDescription)
     package let taskStore: FrozenTaskStore
 
+    /// The non-command remainder of the llbuild graph (standalone node attributes,
+    /// stale-file-removal commands, `<all>` roots, and the two manifest-level
+    /// settings). Together with the per-task `Task` + `LLBuildNodeList` in
+    /// `taskStore`, this is everything needed to re-feed llbuild directly,
+    /// bypassing `manifest.json`. See `LLBuildGraphSupplement`.
+    package let graphSupplement: LLBuildGraphSupplement
+
     /// The set of all (non-virtual) paths produced by tasks in the build description.
     private let allOutputPaths: Set<Path>
 
@@ -216,6 +223,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
         inDir dir: Path,
         signature: BuildDescriptionSignature,
         taskStore: FrozenTaskStore,
+        graphSupplement: LLBuildGraphSupplement,
         allOutputPaths: Set<Path>,
         rootPathsPerTarget: [ConfiguredTarget: [Path]],
         moduleCachePathsPerTarget: [ConfiguredTarget: [Path]],
@@ -241,6 +249,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
         self.dir = dir
         self.signature = signature
         self.taskStore = taskStore
+        self.graphSupplement = graphSupplement
         self.allOutputPaths = allOutputPaths
         self.rootPathsPerTarget = rootPathsPerTarget
         self.moduleCachePathsPerTarget = moduleCachePathsPerTarget
@@ -374,7 +383,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
     package func serialize<T: Serializer>(to serializer: T) {
         guard serializer.delegate is BuildDescriptionSerializerDelegate else { fatalError("delegate must be a BuildDescriptionSerializerDelegate") }
 
-        serializer.beginAggregate(22)
+        serializer.beginAggregate(23)
         serializer.serialize(dir)
         serializer.serialize(signature)
         // Serialize the tasks first so we can index into this array during deserialization.
@@ -409,6 +418,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
         serializer.serialize(targetsBuildInParallel)
         serializer.serialize(emitFrontendCommandLines)
         serializer.serialize(casValidationInfos)
+        serializer.serialize(graphSupplement)
         serializer.endAggregate()
     }
 
@@ -416,7 +426,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
         // Check that we have the appropriate delegate.
         guard let delegate = deserializer.delegate as? BuildDescriptionDeserializerDelegate else { throw DeserializerError.invalidDelegate("delegate must be a BuildDescriptionDeserializerDelegate") }
 
-        try deserializer.beginAggregate(22)
+        try deserializer.beginAggregate(23)
         self.dir = try deserializer.deserialize()
         self.signature = try deserializer.deserialize()
         self.allOutputPaths = try deserializer.deserialize()
@@ -454,6 +464,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
         }
         self.taskStore = taskStore
         self.casValidationInfos = try deserializer.deserialize()
+        self.graphSupplement = try deserializer.deserialize()
     }
 
     package var cost: Int {
@@ -461,7 +472,7 @@ package final class BuildDescription: Serializable, Sendable, Encodable, Cacheab
     }
 }
 
-private extension DependencyDataStyle {
+extension DependencyDataStyle {
     var name: String {
         switch self {
         case .dependencyInfo:
@@ -551,6 +562,15 @@ package final class BuildDescriptionBuilder {
 
     /// The map of commands to JSON fragments.
     private var commandDefinitions: [String: ByteString] = [:]
+
+    /// The non-command remainder of the llbuild graph (standalone node
+    /// attributes, stale-file-removal commands, `<all>` roots, ownership flag),
+    /// carried on the finished `BuildDescription` so that it plus the frozen task
+    /// store can re-feed llbuild (bypassing `manifest.json`). See
+    /// `LLBuildGraphSupplement`. The node appends are guarded by `processTaskLock`
+    /// (populated from the parallel task-processing loop); the scalar remainder is
+    /// set serially in `construct`.
+    fileprivate var graphSupplement = LLBuildGraphSupplement()
 
     /// The map of used in-process classes.
     private var taskActionMap: [String: TaskAction.Type] = [:]
@@ -698,6 +718,13 @@ package final class BuildDescriptionBuilder {
 
                     $0["outputs"] = ["<\(staleFileRemovalIdentifier)>"]
                 }).bytes
+
+                // The same command, recorded for the in-memory path.
+                var staleFileRemoval = LLBuildGraphSupplement.StaleFileRemoval(name: "<\(staleFileRemovalIdentifier)>", expectedOutputs: outputPaths.map { $0.str }, roots: [])
+                if let configuredTarget, let rootPaths = rootPathsPerTarget[configuredTarget] {
+                    staleFileRemoval.roots = rootPaths.map { $0.str }
+                }
+                graphSupplement.staleFileRemovalCommands.append(staleFileRemoval)
             }
         }
 
@@ -715,6 +742,8 @@ package final class BuildDescriptionBuilder {
                 $0["inputs"] = allRootIdentifiers
                 $0["outputs"] = ["<all>"]
             }).bytes
+
+            graphSupplement.allRoots = allRootIdentifiers
         }
 
         func encodeIfNeeded(_ value: ByteString) -> ByteString {
@@ -773,6 +802,24 @@ package final class BuildDescriptionBuilder {
             throw StubError.error("unable to record manifest to build description delegate: \(error)")
         }
 
+        // Finalize the manifest remainder. It is whole-description metadata (nothing
+        // in it is keyed by a task), so it rides on the `BuildDescription` alongside
+        // the frozen store's per-task tables. Together they carry everything needed
+        // to re-feed llbuild directly, bypassing `manifest.json`. See
+        // `LLBuildGraphSupplement`.
+        //
+        // The nodes and stale-file-removal commands are accumulated in encounter
+        // order -- from the parallel task loop and from a dictionary walk,
+        // respectively -- so they have to be sorted before they are persisted. Order
+        // is semantically irrelevant to llbuild (both live in name-keyed maps, which
+        // is why the manifest is deterministic without this), but the serialized
+        // description must be byte-identical across two constructions of the same
+        // workspace.
+        graphSupplement.nodes.sort { $0.name < $1.name }
+        graphSupplement.staleFileRemovalCommands.sort { $0.name < $1.name }
+        graphSupplement.performOwnershipAnalysis = SWBFeatureFlag.performOwnershipAnalysis.value
+        graphSupplement.fileSystemMode = fs.fileSystemMode
+
         let frozenTaskStore = taskStore.freeze()
 
         // Compute the count of tasks by target, which we use to know when a task is complete.
@@ -792,6 +839,7 @@ package final class BuildDescriptionBuilder {
                 inDir: path,
                 signature: signature,
                 taskStore: frozenTaskStore,
+                graphSupplement: graphSupplement,
                 allOutputPaths: allOutputPaths,
                 rootPathsPerTarget: rootPathsPerTarget,
                 moduleCachePathsPerTarget: moduleCachePathsPerTarget,
@@ -821,12 +869,20 @@ package final class BuildDescriptionBuilder {
         }
 
         // Write the manifest to disk at the location defined by the build description.
-        do {
-            try fs.createDirectory(buildDescription.manifestPath.dirname, recursive: true)
-            try fs.write(buildDescription.manifestPath, contents: manifest.bytes, atomically: true)
-        }
-        catch {
-            throw StubError.error("unable to write manifest to '\(buildDescription.manifestPath.str)': \(error)")
+        //
+        // Unless the graph is being handed to llbuild in memory, in which case it
+        // travels on the frozen task store plus the graph supplement and the manifest
+        // is redundant, so its write -- hundreds of megabytes on a large project --
+        // is skipped entirely. Otherwise it is both the artifact llbuild parses and
+        // the substrate the on-disk cache validates against.
+        if !SWBFeatureFlag.useInMemoryLLBuildDescription.value {
+            do {
+                try fs.createDirectory(buildDescription.manifestPath.dirname, recursive: true)
+                try fs.write(buildDescription.manifestPath, contents: manifest.bytes, atomically: true)
+            }
+            catch {
+                throw StubError.error("unable to write manifest to '\(buildDescription.manifestPath.str)': \(error)")
+            }
         }
 
         return buildDescription
@@ -845,11 +901,18 @@ package final class BuildDescriptionBuilder {
     }
 
     /// Assign and record the stable identifier for a planned task.
-    private func assignTaskIdentifier(_ task: any PlannedTask) throws -> TaskIdentifier {
+    ///
+    /// `llbuildInputs`/`llbuildOutputs` are the final, post-amendment llbuild node
+    /// names -- real paths plus virtual gates -- persisted into the task store so
+    /// that a cold process can reconstruct llbuild's scheduling graph without the
+    /// manifest. `repairViaOwnershipAnalysis` is a planning decision carried on
+    /// `PlannedTask` rather than `Task`, and is needed to re-emit the command's
+    /// `repair-via-ownership-analysis` attribute.
+    private func assignTaskIdentifier(_ task: any PlannedTask, llbuildInputs: [String], llbuildOutputs: [String]) throws -> TaskIdentifier {
         // Add to the task list.
         // FIXME: This cast is unfortunate.
         let execTask = task.execTask as! Task
-        return try taskStore.insertTask(execTask)
+        return try taskStore.insertTask(execTask, llbuildInputs: llbuildInputs, llbuildOutputs: llbuildOutputs, repairViaOwnershipAnalysis: task.repairViaOwnershipAnalysis)
     }
 
     /// Get the inputs for a task, amended if necessary.
@@ -877,7 +940,7 @@ package final class BuildDescriptionBuilder {
         var outputs = outputs
         if let info = mutatingTasks[Ref(task)] {
             if let trigger = info.triggerNode {
-                createNodeDefinition(trigger) { definition in
+                createNodeDefinition(trigger, graphSupplementNode: LLBuildGraphSupplement.Node(name: "", isCommandTimestamp: true)) { definition in
                     definition.writeJSONObject {
                         $0["is-command-timestamp"] = true
                     }
@@ -900,14 +963,19 @@ package final class BuildDescriptionBuilder {
     }
 
     /// Helper method for assigning the command definition.
-    private func createCommandDefinition(_ task: any PlannedTask, inputs: [any PlannedNode] = [], outputs: [any PlannedNode] = [], body: (OutputByteStream) -> Void) throws {
+    ///
+    /// `llbuildInputs`/`llbuildOutputs` are the node names as llbuild will see them,
+    /// which is not always `inputs`/`outputs`: a `mkdir` or `symlink` command writes
+    /// no `inputs` into the manifest but still depends on them for scheduling. See
+    /// `assignTaskIdentifier`.
+    private func createCommandDefinition(_ task: any PlannedTask, inputs: [any PlannedNode] = [], outputs: [any PlannedNode] = [], llbuildInputs: [String], llbuildOutputs: [String], body: (OutputByteStream) -> Void) throws {
         // Create the actual definition.
         let definition = OutputByteStream()
         body(definition)
 
         try processTaskLock.withLock {
             // Add it to the definitions map.
-            let identifier = try assignTaskIdentifier(task)
+            let identifier = try assignTaskIdentifier(task, llbuildInputs: llbuildInputs, llbuildOutputs: llbuildOutputs)
             assert(!commandDefinitions.contains(identifier.rawValue), "non-unique task identifier")
             commandDefinitions[identifier.rawValue] = definition.bytes
 
@@ -921,7 +989,12 @@ package final class BuildDescriptionBuilder {
     }
 
     /// Helper method for create a node definition.
-    fileprivate func createNodeDefinition(_ node: any PlannedNode, body: (OutputByteStream) -> Void) {
+    ///
+    /// `graphSupplementNode`, when provided, records the node's attributes into the
+    /// graph supplement so the standalone node can be re-declared to llbuild without
+    /// `manifest.json`. Its `name` is filled in here. See
+    /// `LLBuildGraphSupplement.Node`.
+    fileprivate func createNodeDefinition(_ node: any PlannedNode, graphSupplementNode: LLBuildGraphSupplement.Node? = nil, body: (OutputByteStream) -> Void) {
         // Create the actual definition.
         let definition = OutputByteStream()
         body(definition)
@@ -932,6 +1005,11 @@ package final class BuildDescriptionBuilder {
             let newDefinition = definition.bytes
                 assert(!nodeDefinitions.contains(identifier) || nodeDefinitions[identifier] == newDefinition, "non-unique node identifier '\(identifier)'")
                 nodeDefinitions[identifier] = newDefinition
+
+            if var graphSupplementNode {
+                graphSupplementNode.name = identifier
+                graphSupplement.nodes.append(graphSupplementNode)
+            }
             }
     }
 
@@ -947,7 +1025,7 @@ package final class BuildDescriptionBuilder {
         let outputs = amendedOutputsForTask(task, outputs)
 
         // Add the command definition.
-        try createCommandDefinition(task, inputs: inputs, outputs: outputs) { definition in
+        try createCommandDefinition(task, inputs: inputs, outputs: outputs, llbuildInputs: inputs.map { $0.identifier }, llbuildOutputs: outputs.map { $0.identifier }) { definition in
             definition.writeJSONObject {
                 $0["tool"] = "phony"
                 $0["inputs"] = inputs.map { $0.identifier }
@@ -968,7 +1046,7 @@ package final class BuildDescriptionBuilder {
         let outputs = amendedOutputsForTask(task, outputs)
 
         // Add the command definition.
-        try createCommandDefinition(task, outputs: outputs) { definition in
+        try createCommandDefinition(task, outputs: outputs, llbuildInputs: inputs.map { $0.identifier }, llbuildOutputs: outputs.map { $0.identifier }) { definition in
             definition.writeJSONObject {
                 $0["tool"] = "mkdir"
                 $0["description"] = description.joined(separator: " ")
@@ -990,7 +1068,7 @@ package final class BuildDescriptionBuilder {
         let outputs = amendedOutputsForTask(task, outputs)
 
         // Add the command definition.
-        try createCommandDefinition(task, outputs: outputs) { definition in
+        try createCommandDefinition(task, outputs: outputs, llbuildInputs: inputs.map { $0.identifier }, llbuildOutputs: outputs.map { $0.identifier }) { definition in
             definition.writeJSONObject {
                 $0["tool"] = "symlink"
                 $0["description"] = description.joined(separator: " ")
@@ -1018,7 +1096,7 @@ package final class BuildDescriptionBuilder {
         }
 
         // Add the command definition.
-        try createCommandDefinition(task, inputs: inputs, outputs: outputs) { definition in
+        try createCommandDefinition(task, inputs: inputs, outputs: outputs, llbuildInputs: inputs.map { $0.identifier }, llbuildOutputs: outputs.map { $0.identifier }) { definition in
             definition.writeJSONObject {
                 $0["tool"] = "shell"
                 $0["description"] = description.joined(separator: " ")
@@ -1105,7 +1183,7 @@ package final class BuildDescriptionBuilder {
         }
 
         // Add the command definition.
-        try createCommandDefinition(task, inputs: inputs, outputs: outputs) { definition in
+        try createCommandDefinition(task, inputs: inputs, outputs: outputs, llbuildInputs: inputs.map { $0.identifier }, llbuildOutputs: outputs.map { $0.identifier }) { definition in
             definition.writeJSONObject {
                 $0["tool"] = tool
                 $0["description"] = description.joined(separator: " ")
@@ -1480,6 +1558,13 @@ extension BuildDescription {
         // Define a basic target.
         builder.targetDefinitions[""] = (OutputByteStream() <<< Format.asJSON(["<all>"])).bytes
 
+        // The same attributes `writeContentExclusionPatternIfNecessary` writes, plus
+        // `is-mutated`, in the form the graph supplement carries them.
+        func graphSupplementNode(nodeRef: Ref<any PlannedNode>, isMutated: Bool) -> LLBuildGraphSupplement.Node {
+            let exclusionPatterns = (nodeRef.instance as? PlannedDirectoryTreeNode)?.exclusionPatterns ?? []
+            return LLBuildGraphSupplement.Node(name: "", exclusionPatterns: exclusionPatterns, isMutated: isMutated)
+        }
+
         func writeContentExclusionPatternIfNecessary(nodeRef: Ref<any PlannedNode>, stream: JSONOutputStreamer) {
             let dirNode = nodeRef.instance as? (PlannedDirectoryTreeNode)
             if dirNode?.exclusionPatterns.isEmpty == false {
@@ -1491,7 +1576,7 @@ extension BuildDescription {
         for nodeRef in mutableNodes.keys + nodesToCreateOnlyIfMissing {
             if delegate.cancelled { return nil }
 
-            builder.createNodeDefinition(nodeRef.instance) { definition in
+            builder.createNodeDefinition(nodeRef.instance, graphSupplementNode: graphSupplementNode(nodeRef: nodeRef, isMutated: true)) { definition in
                 definition.writeJSONObject {
                     writeContentExclusionPatternIfNecessary(nodeRef: nodeRef, stream: $0)
                     $0["is-mutated"] = true
@@ -1503,7 +1588,7 @@ extension BuildDescription {
         for nodeRef in additionalNodes {
             if delegate.cancelled { return nil }
 
-            builder.createNodeDefinition(nodeRef.instance) { definition in
+            builder.createNodeDefinition(nodeRef.instance, graphSupplementNode: graphSupplementNode(nodeRef: nodeRef, isMutated: false)) { definition in
                 definition.writeJSONObject {
                     writeContentExclusionPatternIfNecessary(nodeRef: nodeRef, stream: $0)
                 }

@@ -983,6 +983,102 @@ fileprivate struct BuildDescriptionTests: CoreBasedTests {
         #expect(manifest.components(separatedBy: #""env-base":"env-base-0""#).count - 1 == 3, Comment(rawValue: manifest))
     }
 
+    /// Round-trip an `LLBuildGraphSupplement` through MsgPack serialization.
+    ///
+    /// The supplement is persisted on the `BuildDescription` in place of a separate
+    /// `manifest.json` when `useInMemoryLLBuildDescription` is enabled. It carries
+    /// the non-command remainder of the llbuild graph (standalone node attributes,
+    /// stale-file-removal commands, `<all>` roots, ownership flag) so a cold-loaded
+    /// description can be replayed directly into llbuild without re-parsing a
+    /// manifest. This verifies those shapes survive serialization intact.
+    @Test
+    func llbuildGraphSupplementSerialization() throws {
+        var graphSupplement = LLBuildGraphSupplement()
+        graphSupplement.performOwnershipAnalysis = true
+        graphSupplement.fileSystemMode = .deviceAgnostic
+        graphSupplement.allRoots = ["/tmp/a.o", "<target-Foo>"]
+        graphSupplement.nodes = [
+            LLBuildGraphSupplement.Node(name: "/tmp/filtered/", exclusionPatterns: ["_CodeSignature", "*.gitignore"]),
+            LLBuildGraphSupplement.Node(name: "/tmp/mutated", isMutated: true),
+            LLBuildGraphSupplement.Node(name: "", isCommandTimestamp: true),
+        ]
+        graphSupplement.staleFileRemovalCommands = [
+            LLBuildGraphSupplement.StaleFileRemoval(name: "<SFR-Foo>", expectedOutputs: ["/tmp/a.o", "/tmp/b.o"], roots: ["/tmp"]),
+        ]
+
+        let serializer = MsgPackSerializer()
+        serializer.serialize(graphSupplement)
+        let deserializer = MsgPackDeserializer(serializer.byteString)
+        let decoded: LLBuildGraphSupplement = try deserializer.deserialize()
+
+        #expect(decoded.performOwnershipAnalysis == graphSupplement.performOwnershipAnalysis)
+        #expect(decoded.allRoots == graphSupplement.allRoots)
+        // The mode has to survive the round trip: replaying a description under the
+        // wrong file-system mode makes llbuild consider every output modified.
+        #expect(decoded.fileSystemMode == .deviceAgnostic)
+
+        #expect(decoded.nodes.count == graphSupplement.nodes.count)
+        for (a, b) in zip(decoded.nodes, graphSupplement.nodes) {
+            #expect(a.name == b.name)
+            #expect(a.exclusionPatterns == b.exclusionPatterns)
+            #expect(a.isMutated == b.isMutated)
+            #expect(a.isCommandTimestamp == b.isCommandTimestamp)
+        }
+
+        #expect(decoded.staleFileRemovalCommands.count == graphSupplement.staleFileRemovalCommands.count)
+        for (a, b) in zip(decoded.staleFileRemovalCommands, graphSupplement.staleFileRemovalCommands) {
+            #expect(a.name == b.name)
+            #expect(a.expectedOutputs == b.expectedOutputs)
+            #expect(a.roots == b.roots)
+        }
+    }
+
+    /// The order commands are declared in when replaying a description into llbuild
+    /// must not depend on the order the tasks were planned in -- and, more to the
+    /// point, must not depend on Swift's per-process dictionary seed, which is what
+    /// the store's tasks are keyed by.
+    ///
+    /// llbuild itself does not care about declaration order, but a description that
+    /// is shuffled on every build cannot be diffed against the previous build or
+    /// against the manifest, and the shared environment bases are named by encounter
+    /// order, so they would be shuffled with it. The end-to-end tests cannot catch
+    /// this: every build in a test process shares one hash seed.
+    @Test(.requireHostOS(.macOS))
+    func llbuildTaskOrderIsIndependentOfInsertionOrder() async throws {
+        let workspace = try await TestWorkspace("empty", projects: []).load(getCore())
+        let type = MockTaskTypeDescription()
+
+        func makeTask(_ name: String) -> ConstructedTask {
+            var builder = PlannedTaskBuilder(
+                type: type,
+                ruleInfo: ["Foo", name],
+                commandLine: ["true"],
+                inputs: [MakePlannedPathNode(Path.root.join("tmp/\(name).in"))],
+                outputs: [MakePlannedPathNode(Path.root.join("tmp/\(name).out"))])
+            return ConstructedTask(&builder, execTask: Task(&builder))
+        }
+
+        // Enough tasks that an unsorted walk landing in sorted order by chance is not
+        // a plausible way for this test to pass.
+        let names = ["c", "a", "k", "e", "b", "j", "d", "h", "f", "l", "g", "i"]
+
+        func llbuildOrder(ofTasksNamed names: [String]) async throws -> [String] {
+            let tasks = names.map(makeTask)
+            let construct = try await BuildDescription.construct(workspace: workspace, tasks: tasks, path: Path.root.join("tmp"), signature: ByteString(encodingAsUTF8: "signature"), fs: PseudoFS())
+            let description = try #require(construct).buildDescription
+            var order: [String] = []
+            description.taskStore.forEachTaskInLLBuildOrder { task, _ in
+                order.append(task.identifier.rawValue)
+            }
+            return order
+        }
+
+        let order = try await llbuildOrder(ofTasksNamed: names)
+        #expect(order.count == names.count)
+        #expect(order == order.sorted())
+        #expect(try await llbuildOrder(ofTasksNamed: names.reversed()) == order)
+    }
+
     @Test
     func nodeIdentifier() throws {
         #expect(MakePlannedVirtualNode("name").identifier == "<name>")

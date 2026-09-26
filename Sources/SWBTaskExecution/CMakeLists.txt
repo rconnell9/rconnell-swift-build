@@ -28,6 +28,8 @@ add_library(SWBTaskExecution
   DynamicTaskSpecs/SwiftDriverJobDynamicTaskSpec.swift
   DynamicTaskSpecs/SwiftDriverPlanningDynamicTaskSpec.swift
   EnvironmentBaseTable.swift
+  LLBuildCommandEmitter.swift
+  LLBuildGraphSupplement.swift
   ProjectPlanner.swift
   ResponseFileFormat+ExpressibleByArgument.swift
   Task.swift
@@ -79,6 +81,7 @@ add_library(SWBTaskExecution
   TaskActions/TaskAction.swift
   TaskActions/ValidateDevelopmentAssetsTaskAction.swift
   TaskActions/ValidateProductTaskAction.swift
+  TaskLLBuild.swift
   TaskResult.swift
   TaskStore.swift)
 set_target_properties(SWBTaskExecution PROPERTIES
