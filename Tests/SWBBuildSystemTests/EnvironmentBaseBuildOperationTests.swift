@@ -32,6 +32,9 @@ fileprivate struct EnvironmentBaseBuildOperationTests: CoreBasedTests {
     /// that two scripts in the same target share almost entirely.
     @Test(.requireSDKs(.macOS))
     func scriptEnvironmentsAreFactoredAndReconstituted() async throws {
+        // A temporary source root rather than the default: this builds for real and
+        // then asserts the second build is null, so it must not inherit a build
+        // database from whatever ran before it.
         try await withTemporaryDirectory { tmpDir in
             let testProject = TestProject(
                 "aProject",
@@ -51,11 +54,12 @@ fileprivate struct EnvironmentBaseBuildOperationTests: CoreBasedTests {
                             TestSourcesBuildPhase(["main.c"]),
                             // Two scripts with the same environment but for one
                             // variable, which is the shape the factoring is for.
-                            TestShellScriptBuildPhase(name: "First", originalObjectID: "first", contents: "echo first > \"$SCRIPT_OUTPUT_FILE_0\"", outputs: [tmpDir.join("first.txt").str]),
-                            TestShellScriptBuildPhase(name: "Second", originalObjectID: "second", contents: "echo second > \"$SCRIPT_OUTPUT_FILE_0\"", outputs: [tmpDir.join("second.txt").str]),
+                            TestShellScriptBuildPhase(name: "First", originalObjectID: "first", contents: "echo first > \"$SCRIPT_OUTPUT_FILE_0\"", outputs: ["$(DERIVED_FILE_DIR)/first.txt"]),
+                            TestShellScriptBuildPhase(name: "Second", originalObjectID: "second", contents: "echo second > \"$SCRIPT_OUTPUT_FILE_0\"", outputs: ["$(DERIVED_FILE_DIR)/second.txt"]),
                         ]),
                 ])
-            let tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+            let testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDir.join("Test"), projects: [testProject])
+            let tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
             let projectDir = tester.workspace.projects[0].sourceRoot
             try await tester.fs.writeFileContents(projectDir.join("main.c")) { $0 <<< "int main() { return 0; }\n" }
 

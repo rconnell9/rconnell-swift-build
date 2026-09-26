@@ -23,7 +23,8 @@ import SWBTaskExecution
 /// command's signature would shift the first time a build took the factored path.
 @Suite
 fileprivate struct EnvironmentBaseTableTests {
-    /// An environment large enough to be worth factoring.
+    /// An environment of a representative shape: enough variables that overrides are
+    /// visibly a small part of it.
     private func bindings(_ overrides: [String: String] = [:], count: Int = 12) -> [(String, String)] {
         (0..<count).map { index in
             let key = "VAR_\(index)"
@@ -61,11 +62,11 @@ fileprivate struct EnvironmentBaseTableTests {
     }
 
     /// An environment identical to its base sends nothing at all -- the case that
-    /// does the bulk of the work on a real build, where most commands within a
-    /// target share an environment outright.
+    /// does the bulk of the work on the SwiftPM-shaped builds, where every command
+    /// carries the same single large `PATH`.
     @Test
     func identicalEnvironmentSendsNoOverrides() {
-        let table = EnvironmentBaseTable(environments: [bindings()])
+        let table = EnvironmentBaseTable(environments: [bindings(), bindings()])
 
         guard case .useBase(let base, let overrides) = table.factoring(for: bindings()) else {
             Issue.record("expected an identical environment to reuse the base")
@@ -118,7 +119,7 @@ fileprivate struct EnvironmentBaseTableTests {
     func reorderedKeysGetSeparateBases() {
         let environment = bindings()
         let reordered = Array(environment.reversed())
-        let table = EnvironmentBaseTable(environments: [environment, reordered])
+        let table = EnvironmentBaseTable(environments: [environment, environment, reordered, reordered])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
         #expect(table.factoring(for: environment) == .useBase(base: "env-base-0", overrides: []))
@@ -129,20 +130,50 @@ fileprivate struct EnvironmentBaseTableTests {
     /// keys it would have to append to.
     @Test
     func differentKeysGetSeparateBases() {
-        let table = EnvironmentBaseTable(environments: [bindings(), bindings(count: 13)])
+        let table = EnvironmentBaseTable(environments: [bindings(), bindings(), bindings(count: 13), bindings(count: 13)])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
         #expect(table.factoring(for: bindings(count: 13)) == .useBase(base: "env-base-1", overrides: []))
     }
 
-    /// Small environments are not worth a base declaration plus an `env-base`
-    /// attribute, so they go across whole.
+    /// A key list only one command uses is sent inline: a base has to be declared
+    /// in full, so factoring such an environment costs the whole of it again plus
+    /// the reference.
     @Test
-    func smallEnvironmentsAreSentInline() {
-        let table = EnvironmentBaseTable(environments: [bindings(count: 3)])
+    func keyListUsedOnceIsSentInline() {
+        let table = EnvironmentBaseTable(environments: [bindings(), bindings(count: 400)])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.factoring(for: bindings(count: 3)) == .inline)
+        #expect(table.factoring(for: bindings()) == .inline)
+        #expect(table.factoring(for: bindings(count: 400)) == .inline)
+    }
+
+    /// Size is not the criterion -- two commands sharing even a single variable get
+    /// a base. This is the SwiftPM shape, where the one variable is a `PATH` far
+    /// larger than any name-count rule would suggest.
+    @Test
+    func smallSharedEnvironmentGetsABase() {
+        let environment = bindings(count: 1)
+        let table = EnvironmentBaseTable(environments: [environment, environment])
+
+        #expect(table.declaredBases.map { $0.name } == ["env-base-0"])
+        #expect(table.factoring(for: environment) == .useBase(base: "env-base-0", overrides: []))
+    }
+
+    /// Names run consecutively over the bases actually declared, leaving no gap
+    /// where a key list in between turned out to be used just once. A gap would be
+    /// harmless to llbuild but would make a manifest diff needlessly hard to read.
+    @Test
+    func baseNamesSkipKeyListsUsedOnce() {
+        let shared = bindings()
+        let once = bindings(count: 5)
+        let alsoShared = bindings(count: 13)
+        let table = EnvironmentBaseTable(environments: [shared, shared, once, alsoShared, alsoShared])
+
+        #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
+        #expect(table.factoring(for: shared) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.factoring(for: once) == .inline)
+        #expect(table.factoring(for: alsoShared) == .useBase(base: "env-base-1", overrides: []))
     }
 
     /// A duplicated key cannot survive the round trip -- a base holds one binding
@@ -173,8 +204,9 @@ fileprivate struct EnvironmentBaseTableTests {
     /// one that appears anyway.
     @Test
     func unregisteredEnvironmentIsSentInline() {
-        let table = EnvironmentBaseTable(environments: [bindings()])
+        let table = EnvironmentBaseTable(environments: [bindings(), bindings()])
 
+        #expect(table.declaredBases.count == 1)
         #expect(table.factoring(for: bindings(count: 20)) == .inline)
     }
 
