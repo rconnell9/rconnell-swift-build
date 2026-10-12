@@ -64,9 +64,8 @@ package struct EnvironmentBaseTable: Sendable {
 
     private var candidates: [Candidate] = []
 
-    /// Candidates by hash of the key list. A bucket holds more than one entry only
-    /// on hash collision, which the key comparison then resolves.
-    private var candidatesByKeysHash: [Int: [Int]] = [:]
+    /// Candidates indexed by their key list.
+    private var candidateIndexByKeys: [[String]: Int] = [:]
 
     /// An empty table, which factors nothing: every environment is `.inline`.
     package init() {}
@@ -94,28 +93,22 @@ package struct EnvironmentBaseTable: Sendable {
     /// An environment that was never registered -- or one whose key list did not
     /// earn a base -- is sent whole.
     package func factoring(for bindings: [(String, String)]) -> EnvironmentFactoring {
-        guard let candidate = candidate(forKeysOf: bindings), let name = candidate.name else { return .inline }
-        return .useBase(base: name, overrides: overrides(in: bindings, of: candidate.bindings))
+        guard let candidate = candidate(forKeysOf: bindings), let name = candidate.name else { return .inline
+        }
+        return .useBase(base: name, overrides: overrxides(in: bindings, of: candidate.bindings))
     }
 
     private mutating func register(_ bindings: [(String, String)]) {
         guard !bindings.isEmpty else { return }
+
         if let index = candidateIndex(forKeysOf: bindings) {
             candidates[index].references += 1
             return
         }
 
-        // The first environment registered with these keys is the one that would
-        // declare the base for the rest.
-        //
-        // A duplicated key would not survive the round trip -- the base holds one
-        // binding per key, and an override substitutes in place rather than
-        // repeating -- so such a key list is recorded as unfactorable rather than
-        // silently collapsed. Bindings come from a dictionary in practice, so this
-        // is a guard rather than a case worth optimizing.
         let unfactorable = Set(bindings.lazy.map { $0.0 }).count != bindings.count
         candidates.append(Candidate(bindings: bindings, name: nil, unfactorable: unfactorable, references: 1))
-        candidatesByKeysHash[Self.keysHash(of: bindings), default: []].append(candidates.count - 1)
+        candidateIndexByKeys[bindings.map { $0.0 }] = candidates.count - 1
     }
 
     private mutating func nameSharedBases() {
@@ -127,30 +120,11 @@ package struct EnvironmentBaseTable: Sendable {
     }
 
     private func candidateIndex(forKeysOf bindings: [(String, String)]) -> Int? {
-        for index in candidatesByKeysHash[Self.keysHash(of: bindings)] ?? [] where hasSameKeys(candidates[index].bindings, bindings) {
-            return index
-        }
-        return nil
+        candidateIndexByKeys[bindings.map { $0.0 }]
     }
 
     private func candidate(forKeysOf bindings: [(String, String)]) -> Candidate? {
         candidateIndex(forKeysOf: bindings).map { candidates[$0] }
-    }
-
-    private static func keysHash(of bindings: [(String, String)]) -> Int {
-        var hasher = Hasher()
-        for (key, _) in bindings {
-            hasher.combine(key)
-        }
-        return hasher.finalize()
-    }
-
-    private func hasSameKeys(_ lhs: [(String, String)], _ rhs: [(String, String)]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for index in lhs.indices where lhs[index].0 != rhs[index].0 {
-            return false
-        }
-        return true
     }
 
     private func overrides(in bindings: [(String, String)], of base: [(String, String)]) -> [(String, String)] {
