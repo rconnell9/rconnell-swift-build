@@ -552,13 +552,7 @@ extension ConstructedTask {
         }
     }
 
-    /// The environment this task will hand llbuild as its command's environment, or
-    /// `nil` if it is described as a kind of command that carries none.
-    ///
-    /// `EnvironmentBaseTable` is built from these before any command is described,
-    /// so this has to agree with the routing above: an environment collected here
-    /// that never reaches a command leaves an unreferenced base in the manifest, and
-    /// one that reaches a command without being collected is merely sent inline.
+    /// The environment this task will hand llbuild as its command's environment
     var environmentToDescribe: EnvironmentBindings? {
         switch descriptionKind {
         case .subprocess:
