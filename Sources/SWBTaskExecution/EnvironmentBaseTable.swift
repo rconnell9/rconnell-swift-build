@@ -88,14 +88,10 @@ package struct EnvironmentBaseTable: Sendable {
         candidates.lazy.compactMap { candidate in candidate.name.map { ($0, candidate.bindings) } }
     }
 
-    /// How `bindings` should be sent, given the bases this table holds.
-    ///
-    /// An environment that was never registered -- or one whose key list did not
-    /// earn a base -- is sent whole.
     package func factoring(for bindings: [(String, String)]) -> EnvironmentFactoring {
         guard let candidate = candidate(forKeysOf: bindings), let name = candidate.name else { return .inline
         }
-        return .useBase(base: name, overrides: overrxides(in: bindings, of: candidate.bindings))
+        return .useBase(base: name, overrides: computeOverrides(in: bindings, relativeTo: candidate.bindings))
     }
 
     private mutating func register(_ bindings: [(String, String)]) {
@@ -127,7 +123,7 @@ package struct EnvironmentBaseTable: Sendable {
         candidateIndex(forKeysOf: bindings).map { candidates[$0] }
     }
 
-    private func overrides(in bindings: [(String, String)], of base: [(String, String)]) -> [(String, String)] {
+    private func computeOverrides(in bindings: [(String, String)], relativeTo base: [(String, String)]) -> [(String, String)] {
         var overrides: [(String, String)] = []
         for index in bindings.indices where bindings[index].1 != base[index].1 {
             overrides.append(bindings[index])
