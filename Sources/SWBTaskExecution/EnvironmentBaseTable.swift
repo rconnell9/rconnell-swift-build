@@ -37,26 +37,10 @@ package enum EnvironmentFactoring: Equatable {
 /// Factors the bulk of shared environment variables out of inidivudal commands
 package struct EnvironmentBaseTable: Sendable {
 
-    /// A key list that might be worth a shared base, and the environment whose
-    /// values would declare it.
     private struct Candidate: Sendable {
-
-        /// The bindings the base would be declared with, in order. Every member of
-        /// the group has this same key list, index for index, so computing a
-        /// member's overrides is a walk of two arrays rather than a map lookup per
-        /// variable.
         let bindings: [(String, String)]
-
-        /// The name to declare the base under, or `nil` where this key list did not
-        /// earn one and its members send their environments whole. Assigned once
-        /// every environment has been registered; see `nameSharedBases()`.
         var name: String?
-
-        /// Set when this key list cannot be represented as a base at all. See
-        /// `register(_:)`.
         let unfactorable: Bool
-
-        /// How many environments registered with this key list.
         var references: Int
     }
 
@@ -64,18 +48,11 @@ package struct EnvironmentBaseTable: Sendable {
 
     private var candidates: [Candidate] = []
 
-    /// Candidates indexed by their key list.
     private var candidateIndexByKeys: [[String]: Int] = [:]
 
-    /// An empty table, which factors nothing: every environment is `.inline`.
     package init() {}
 
     /// Build a table over all of a build's environments.
-    ///
-    /// `environments` must be in an order that does not vary between two
-    /// constructions of the same build, because it decides which environment's
-    /// values each base is declared with, and hence what every other member of
-    /// its group sends as overrides.
     package init(environments: some Sequence<[(String, String)]>) {
         for bindings in environments {
             register(bindings)
