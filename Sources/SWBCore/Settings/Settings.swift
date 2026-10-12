@@ -680,8 +680,10 @@ public final class Settings: PlatformBuildContext, TripleLookup, Sendable {
     /// The global evaluation scope.
     public let globalScope: MacroEvaluationScope
 
-    /// The file path resolver.
-    public let filePathResolver: FilePathResolver
+    /// Create a new file path resolver which evaluates paths in the global scope.
+    public func makeFilePathResolver(cacheResults: Bool) -> FilePathResolver {
+        return FilePathResolver(scope: globalScope, projectDir: project == nil ? .root : nil, cacheResults: cacheResults)
+    }
 
     /// The executable search paths.
     public let executableSearchPaths: StackedSearchPath
@@ -872,9 +874,6 @@ public final class Settings: PlatformBuildContext, TripleLookup, Sendable {
         // Create the global evaluation scope.  This uses the bound SDK if the SettingsContext's purpose wants that condition.
         let globalScope = builder.createScope(sdkToUse: settingsContext.purpose.bindToSDK ? self.sdk : nil)
         self.globalScope = globalScope
-
-        // Create the file path resolver.
-        self.filePathResolver = FilePathResolver(scope: globalScope, projectDir: settingsContext.project == nil ? .root : nil)
 
         // Compute the executable search paths.
         self.executableSearchPaths = workspaceContext.createExecutableSearchPaths(platform: boundProperties.platform, toolchains: boundProperties.toolchains)
@@ -1193,6 +1192,16 @@ public enum SettingsPurpose: String, Sendable {
             return false
         }
     }
+
+    /// If `true`, then the `Settings` object retains snapshots of its settings table at each level for editor use.
+    var retainsLevelSnapshots: Bool {
+        switch self {
+        case .build:
+            return false
+        case .editor:
+            return true
+        }
+    }
 }
 
 public struct SettingsContext: Sendable {
@@ -1423,6 +1432,13 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
     private var upToTargetXcconfigSettings: MacroValueAssignmentTable? = nil
     private var upToTargetSettings: MacroValueAssignmentTable? = nil
 
+    private func captureLevelSnapshotIfRequested() -> MacroValueAssignmentTable? {
+        guard settingsContext.purpose.retainsLevelSnapshots else {
+            return nil
+        }
+        return MacroValueAssignmentTable(copying: _table)
+    }
+
     /// The project model components which were used to construct the settings made by this builder.
     var constructionComponents: Settings.ConstructionComponents {
         return Settings.ConstructionComponents(
@@ -1546,7 +1562,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
         }
 
         // Save the settings we've constructed to this point as the default settings in the construction components.
-        self.upToDefaultsSettings = MacroValueAssignmentTable(copying: _table)
+        self.upToDefaultsSettings = captureLevelSnapshotIfRequested()
 
         // Add the project settings.
         if let effectiveProjectConfig {
@@ -3131,7 +3147,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
             // Resolve the path.
             //
             // FIXME: It is unfortunate that we need to create a custom file path resolver just for this case (which will not use any cached values). This is also unfortunate from a user perspective, as it is not at all clear what settings could be used in an xcconfig file path. We should consider defining this more formally in a way that can also efficiently be evaluated.
-            let resolver = FilePathResolver(scope: createScope(sdkToUse: sdk))
+            let resolver = FilePathResolver(scope: createScope(sdkToUse: sdk), cacheResults: false)
             let path = resolver.resolveAbsolutePath(configFileRef, resolveParameterizedProductName: false)
             inputPathsAffectingSettings.append(path)
 
@@ -3153,7 +3169,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
             self.projectXcconfig = .init(path: path, settings: info.table, finalLineNumber: info.finalLineNumber, finalColumnNumber: info.finalColumnNumber)
 
             // Also save the table we've constructed so far.
-            self.upToProjectXcconfigSettings = MacroValueAssignmentTable(copying: _table)
+            self.upToProjectXcconfigSettings = captureLevelSnapshotIfRequested()
         }
 
         // Add application preferences build settings.
@@ -3177,7 +3193,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
         self.projectSettings = config.buildSettings
 
         // Also save the table we've constructed so far.
-        self.upToProjectSettings = MacroValueAssignmentTable(copying: _table)
+        self.upToProjectSettings = captureLevelSnapshotIfRequested()
     }
 
     func validateSDK(_ sdk: SDK, sdkVariant: SDKVariant?, scope: MacroEvaluationScope) {
@@ -3375,7 +3391,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
             // Resolve the path.
             //
             // FIXME: It is unfortunate that we need to create a custom file path resolver just for this case. See the similar comment for adding project settings.
-            let resolver = FilePathResolver(scope: createScope(sdkToUse: sdk))
+            let resolver = FilePathResolver(scope: createScope(sdkToUse: sdk), cacheResults: false)
             let path = resolver.resolveAbsolutePath(configFileRef, resolveParameterizedProductName: false)
             inputPathsAffectingSettings.append(path)
 
@@ -3397,7 +3413,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
             self.targetXcconfig = .init(path: path, settings: info.table, finalLineNumber: info.finalLineNumber, finalColumnNumber: info.finalColumnNumber)
 
             // Save the table we've constructed so far.
-            self.upToTargetXcconfigSettings = MacroValueAssignmentTable(copying: _table)
+            self.upToTargetXcconfigSettings = captureLevelSnapshotIfRequested()
         }
 
         // Add the targets's config settings.
@@ -3425,7 +3441,7 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
         self.targetSettings = config.buildSettings
 
         // Also save the table we've constructed so far.
-        self.upToTargetSettings = MacroValueAssignmentTable(copying: _table)
+        self.upToTargetSettings = captureLevelSnapshotIfRequested()
     }
 
     func addSpecializationOverrides(sdk: SDK?, usesAutomaticSDK: Bool) {
@@ -4822,9 +4838,13 @@ private class SettingsBuilder: ProjectMatchLookup, TripleLookup {
         table.push(BuiltinMacros.ARCHS, literal: orderedEffectiveArchs)
         table.push(BuiltinMacros.TARGET_TRIPLES_ORIGINAL, literal: originalTripleStrings)
         table.push(BuiltinMacros.TARGET_TRIPLES, literal: orderedEffectiveTriples.map({ $0.description }))
+
+        // Define settings needed for triple-indexed slices.
         table.push(BuiltinMacros.USE_TRIPLE_INDEXED_SLICES, literal: useTripleIndexedSlices)
         if useTripleIndexedSlices {
             table.push(BuiltinMacros.SLICES, literal: orderedEffectiveTriples.map({ $0.unversioned.description }))
+            // This will change the default value of LIBTOOL, but will still allow projects to override it if necessary.
+            table.push(BuiltinMacros.LIBTOOL_DRIVER, literal: "clang")
         }
         else {
             table.push(BuiltinMacros.SLICES, literal: orderedEffectiveArchs)

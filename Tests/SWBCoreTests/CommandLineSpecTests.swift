@@ -1630,23 +1630,30 @@ import SWBMacro
     func libtoolTaskConstruction() async throws {
         let core = try await getCore()
         let librarianSpec: LinkerSpec = try core.specRegistry.getSpec(ofType: LibtoolLinkerSpec.self)
+        let sdk = core.loadSDK(.iOS)
+        let arch = "arm64"
+        let cohortArch = "arm64.cohort"
+        let unversionedTriple = "\(arch)-apple-ios"
+        let variant = "normal"
 
-        // Create the mock table.
-        // Since we're not pushing any of the settings from the xcspec here, the resulting task won't have any of those.
-        // The spec is inconsistent in its use of $(arch) vs. $(CURRENT_ARCH) (and also variant), so if we decide to test the spec here, we should unify those, probably on CURRENT_*** as that's the more modern form.
+        // Create the mock table, which will get re-used through the test.  We include all the defaults for the tool specification.
         var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
-        table.push(try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("LIBTOOL") as? PathMacroDeclaration), literal: "libtool")
-        table.push(BuiltinMacros.LIBTOOL_USE_RESPONSE_FILE, literal: true)
-        table.push(BuiltinMacros.CURRENT_ARCH, literal: "x86_64")
-        table.push(BuiltinMacros.CURRENT_VARIANT, literal: "normal")
+        for option in librarianSpec.flattenedOrderedBuildOptions {
+            guard let value = option.defaultValue else { continue }
+            table.push(option.macro, value)
+        }
+        table.push(BuiltinMacros.PRODUCT_NAME, literal: "library")
+        table.push(BuiltinMacros.CURRENT_ARCH, literal: arch)
+        table.push(BuiltinMacros.CURRENT_TARGET_TRIPLE, literal: "\(unversionedTriple)\(sdk.defaultDeploymentTarget)")
+        table.push(BuiltinMacros.CURRENT_TARGET_TRIPLE_UNVERSIONED, literal: unversionedTriple)
+        table.push(BuiltinMacros.COHORT_ARCHS, literal: [cohortArch])
+        table.push(BuiltinMacros.CURRENT_VARIANT, literal: variant)
         table.push(BuiltinMacros.CURRENT_SLICE, core.specRegistry.internalMacroNamespace.parseString("$(CURRENT_ARCH)"))
         table.push(BuiltinMacros.CURRENT_SLICE_UNVERSIONED, core.specRegistry.internalMacroNamespace.parseString("$(CURRENT_SLICE)"))
+        table.push(BuiltinMacros.SDKROOT, literal: sdk.path.str)
+        table.push(BuiltinMacros.LIBTOOL_USE_RESPONSE_FILE, literal: true)
+        table.push(core.specRegistry.internalMacroNamespace.lookupOrDeclareMacro(UserDefinedMacroDeclaration.self, "OBJECT_FILE_DIR_\(variant)"), literal: [Path.root.join("tmp/obj/\(variant)").str])
 
-        let producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.library.static", platform: "macosx")
-        let delegate = try CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)
-        let mockScope = MacroEvaluationScope(table: table)
-        let mockFileType = try core.specRegistry.getSpec("file", ofType: FileTypeSpec.self)
-        let cbc = CommandBuildContext(producer: producer, scope: mockScope, inputs: [FileToBuild(absolutePath: Path.root.join("tmp/obj/normal/x86_64/file1.o"), fileType: mockFileType)], output: Path.root.join("tmp/obj/normal/x86_64/output"))
         let libraries = [
             LinkerSpec.LibrarySpecifier(kind: .static, path: Path.root.join("usr/lib/libfoo1.a"), mode: .normal, useSearchPaths: true, isKnownToUseSwift: false, swiftModulePaths: [:], swiftModuleAdditionalLinkerArgResponseFilePaths: [:]),
             LinkerSpec.LibrarySpecifier(kind: .static, path: Path.root.join("usr/lib/libfoo2.a"), mode: .weak, useSearchPaths: true, isKnownToUseSwift: false, swiftModulePaths: [:], swiftModuleAdditionalLinkerArgResponseFilePaths: [:]),
@@ -1671,30 +1678,88 @@ import SWBMacro
             // This is a no-op because object files get added in the SourcesTaskProducer, but we want to confirm that this is the case.
             LinkerSpec.LibrarySpecifier(kind: .object, path: Path.root.join("tmp/Bar.o"), mode: .normal, useSearchPaths: false, isKnownToUseSwift: false, swiftModulePaths: [:], swiftModuleAdditionalLinkerArgResponseFilePaths: [:]),
         ]
-        await librarianSpec.constructLinkerTasks(cbc, delegate, libraries: libraries, usedTools: [:])
 
-        // There should be exactly one shell task.
-        #expect(delegate.shellTasks.count == 1)
-        let task = try #require(delegate.shellTasks[safe: 0])
-        #expect(task.ruleInfo == ["Libtool", Path.root.join("tmp/obj/normal/x86_64/output").str, "normal", "x86_64"])
-        #expect(task.execDescription == "Create static library output (x86_64)")
-        // FIXME: This still has a lot of issues.
-        task.checkCommandLine([
-            "libtool", "-static",
-            // libtool doesn't support weak linkage, so libraries and frameworks marked as weak are passed normally
-            "-lfoo1", "-lfoo2", Path.root.join("usr/lib/libfoo3.a").str, Path.root.join("usr/lib/libfoo4.a").str,
-            // dylibs are not passed
-            // tbd files are not passed
-            "-o", Path.root.join("tmp/obj/normal/x86_64/output").str])
-        // FIXME: The input here should really be the link file list.
-        task.checkInputs([
-            .path(Path.root.join("tmp/obj/normal/x86_64/file1.o").str),
-            .path(Path.root.join("usr/lib/libfoo3.a").str),
-            .path(Path.root.join("usr/lib/libfoo4.a").str)
-        ])
-        task.checkOutputs([
-            .path(Path.root.join("tmp/obj/normal/x86_64/output").str)
-        ])
+        // Test using libtool directly.
+        do {
+            let producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.library.static", platform: "macosx")
+            let delegate = try CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)
+            let mockScope = MacroEvaluationScope(table: table)
+            let mockFileType = try core.specRegistry.getSpec("file", ofType: FileTypeSpec.self)
+            let cbc = CommandBuildContext(producer: producer, scope: mockScope, inputs: [FileToBuild(absolutePath: Path.root.join("tmp/obj/\(variant)/\(arch)/file1.o"), fileType: mockFileType)], output: Path.root.join("tmp/obj/\(variant)/\(arch)/output"))
+            await librarianSpec.constructLinkerTasks(cbc, delegate, libraries: libraries, usedTools: [:])
+
+            // There should be exactly one shell task.
+            #expect(delegate.shellTasks.count == 1)
+            let task = try #require(delegate.shellTasks[safe: 0])
+            #expect(task.ruleInfo == ["Libtool", Path.root.join("tmp/obj/\(variant)/\(arch)/output").str, variant, arch])
+            #expect(task.execDescription == "Create static library output (\(arch), \(cohortArch))")
+            // FIXME: This still has a lot of issues.
+            task.checkCommandLine([
+                "libtool", "-static",
+                "-arch_only", arch,
+                "-arch_variant", cohortArch,
+                "-D",
+                "-syslibroot", sdk.path.str,
+                // libtool doesn't support weak linkage, so libraries and frameworks marked as weak are passed normally
+                "-lfoo1", "-lfoo2", Path.root.join("usr/lib/libfoo3.a").str, Path.root.join("usr/lib/libfoo4.a").str,
+                // dylibs are not passed
+                // tbd files are not passed
+                "-dependency_info", Path.root.join("tmp/obj/\(variant)/\(arch)/library_libtool_dependency_info.dat").str,
+                "-o", Path.root.join("tmp/obj/\(variant)/\(arch)/output").str])
+            // FIXME: The input here should really be the link file list.
+            task.checkInputs([
+                .path(Path.root.join("tmp/obj/\(variant)/\(arch)/file1.o").str),
+                .path(Path.root.join("usr/lib/libfoo3.a").str),
+                .path(Path.root.join("usr/lib/libfoo4.a").str),
+            ])
+            task.checkOutputs([
+                .path(Path.root.join("tmp/obj/\(variant)/\(arch)/output").str),
+                .path(Path.root.join("tmp/obj/\(variant)/\(arch)/library_libtool_dependency_info.dat").str),
+            ])
+        }
+
+        // Test driving libtool with clang.
+        do {
+            table.push(BuiltinMacros.LIBTOOL_DRIVER, literal: "clang")
+            table.push(BuiltinMacros.CURRENT_SLICE, core.specRegistry.internalMacroNamespace.parseString("$(CURRENT_TARGET_TRIPLE)"))
+            table.push(BuiltinMacros.CURRENT_SLICE_UNVERSIONED, core.specRegistry.internalMacroNamespace.parseString("$(CURRENT_TARGET_TRIPLE_UNVERSIONED)"))
+
+            let producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.library.static", platform: "macosx")
+            let delegate = try CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)
+            let mockScope = MacroEvaluationScope(table: table)
+            let mockFileType = try core.specRegistry.getSpec("file", ofType: FileTypeSpec.self)
+            let cbc = CommandBuildContext(producer: producer, scope: mockScope, inputs: [FileToBuild(absolutePath: Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/file1.o"), fileType: mockFileType)], output: Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/output"))
+            await librarianSpec.constructLinkerTasks(cbc, delegate, libraries: libraries, usedTools: [:])
+
+            // There should be exactly one shell task.
+            #expect(delegate.shellTasks.count == 1)
+            let task = try #require(delegate.shellTasks[safe: 0])
+            #expect(task.ruleInfo == ["Libtool", Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/output").str, variant, unversionedTriple])
+            #expect(task.execDescription == "Create static library output (\(unversionedTriple), \(cohortArch))")
+            // FIXME: This still has a lot of issues.
+            task.checkCommandLine([
+                "clang", "--emit-static-lib",
+                "-target", "\(unversionedTriple)\(sdk.defaultDeploymentTarget)", "--static-lib-target-arch-only",
+                "-target-arch-variant", cohortArch,
+                "--static-lib-deterministic",
+                "-isysroot", sdk.path.str,
+                // libtool doesn't support weak linkage, so libraries and frameworks marked as weak are passed normally
+                "-lfoo1", "-lfoo2", Path.root.join("usr/lib/libfoo3.a").str, Path.root.join("usr/lib/libfoo4.a").str,
+                // dylibs are not passed
+                // tbd files are not passed
+                "-Xstatic-lib-tool", "-dependency_info", "-Xstatic-lib-tool", Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/library_libtool_dependency_info.dat").str,
+                "-o", Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/output").str])
+            // FIXME: The input here should really be the link file list.
+            task.checkInputs([
+                .path(Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/file1.o").str),
+                .path(Path.root.join("usr/lib/libfoo3.a").str),
+                .path(Path.root.join("usr/lib/libfoo4.a").str),
+            ])
+            task.checkOutputs([
+                .path(Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/output").str),
+                .path(Path.root.join("tmp/obj/\(variant)/\(unversionedTriple)/library_libtool_dependency_info.dat").str),
+            ])
+        }
     }
 
     @Test
@@ -2023,6 +2088,8 @@ import SWBMacro
         let projectTmpDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("PROJECT_TEMP_DIR") as? PathMacroDeclaration)
         let builtDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("BUILT_PRODUCTS_DIR") as? PathMacroDeclaration)
         let workspaceDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("WORKSPACE_DIR") as? StringMacroDeclaration)
+        let objRoot = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("OBJROOT") as? PathMacroDeclaration)
+        let buildDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("BUILD_DIR") as? PathMacroDeclaration)
 
         func test(caching: Bool, prefixMapping: Bool, completeMapping: Bool, extraMaps: [String], completion: ([String]) throws -> Void) async throws {
             var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
@@ -2035,6 +2102,8 @@ import SWBMacro
             table.push(projectTmpDir, literal: "/build")
             table.push(builtDir, literal: "/products")
             table.push(workspaceDir, literal: "/workspace")
+            table.push(objRoot, literal: "/objroot")
+            table.push(buildDir, literal: "/symroot")
             let mockScope = MacroEvaluationScope(table: table)
             let producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.framework", platform: "macosx")
             let delegate = try CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)
@@ -2070,6 +2139,8 @@ import SWBMacro
                 "-fdepscan-prefix-map=/build=/^derived",
                 "-fdepscan-prefix-map=/products=/^built",
                 "-fdepscan-prefix-map=/workspace=/^workspace",
+                "-fdepscan-prefix-map=/objroot=/^intermediates",
+                "-fdepscan-prefix-map=/symroot=/^products",
             ])
         })
         try await test(caching: true, prefixMapping: true, completeMapping: false, extraMaps: ["/a=/b", "/c=/d"], completion: { args in
@@ -2098,6 +2169,8 @@ import SWBMacro
         let projectTmpDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("PROJECT_TEMP_DIR") as? PathMacroDeclaration)
         let builtDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("BUILT_PRODUCTS_DIR") as? PathMacroDeclaration)
         let workspaceDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("WORKSPACE_DIR") as? StringMacroDeclaration)
+        let objRoot = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("OBJROOT") as? PathMacroDeclaration)
+        let buildDir = try #require(core.specRegistry.internalMacroNamespace.lookupMacroDeclaration("BUILD_DIR") as? PathMacroDeclaration)
 
         func test(caching: Bool, prefixMapping: Bool, completeMapping: Bool, extraMaps: [String], completion: ([String]) throws -> Void) async throws {
             // Create the mock table.
@@ -2123,6 +2196,8 @@ import SWBMacro
             table.push(projectTmpDir, literal: "/build")
             table.push(builtDir, literal: "/products")
             table.push(workspaceDir, literal: "/workspace")
+            table.push(objRoot, literal: "/objroot")
+            table.push(buildDir, literal: "/symroot")
             table.push(BuiltinMacros.CURRENT_ARCH, literal: "x86_64")
             table.push(BuiltinMacros.CURRENT_SLICE, core.specRegistry.internalMacroNamespace.parseString("$(CURRENT_ARCH)"))
             table.push(BuiltinMacros.CURRENT_SLICE_UNVERSIONED, core.specRegistry.internalMacroNamespace.parseString("$(CURRENT_SLICE)"))
@@ -2179,6 +2254,8 @@ import SWBMacro
                 "-scanner-prefix-map", "/build=/^derived",
                 "-scanner-prefix-map", "/products=/^built",
                 "-scanner-prefix-map", "/workspace=/^workspace",
+                "-scanner-prefix-map", "/objroot=/^intermediates",
+                "-scanner-prefix-map", "/symroot=/^products",
             ])
         })
         try await test(caching: true, prefixMapping: true, completeMapping: false, extraMaps: ["/a=/b", "/c=/d"], completion: { args in
