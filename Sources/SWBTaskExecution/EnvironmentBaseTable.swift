@@ -164,10 +164,6 @@ package struct EnvironmentBaseTable: Sendable {
         candidatesByKeysHash[Self.keysHash(of: bindings), default: []].append(candidates.count - 1)
     }
 
-    /// Name the key lists that earned a base, which is what commits the table to
-    /// factoring them. Done in one pass at the end so that the names run
-    /// consecutively over the bases actually declared, rather than leaving gaps
-    /// where a key list turned out to be used just once.
     private mutating func nameSharedBases() {
         var declared = 0
         for index in candidates.indices where !candidates[index].unfactorable && candidates[index].references >= Self.minimumCommandsToShareABase {
