@@ -935,12 +935,12 @@ fileprivate struct BuildDescriptionTests: CoreBasedTests {
         }
     }
 
-    /// Commands sharing an environment are factored onto a declared `env-base`, and
+    /// Commands sharing an environment are encoded against a declared `env-base`, and
     /// the one that differs sends only the binding that differs. The bases must be
     /// declared ahead of `commands` in the manifest, since llbuild resolves each
     /// `env-base` as it reads the command referencing it.
     @Test
-    func manifestFactorsSharedEnvironments() async throws {
+    func manifestSharesEnvironmentBases() async throws {
         let fs = PseudoFS()
         let type = MockTaskTypeDescription()
 

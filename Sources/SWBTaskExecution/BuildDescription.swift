@@ -1028,7 +1028,7 @@ package final class BuildDescriptionBuilder {
                 // This defaults to true, we'll omit to to save space
                 // $0["inherit-env"] = "true"
                 if let environment {
-                    switch environmentBases.factoring(for: environment.bindings) {
+                    switch environmentBases.encoding(for: environment.bindings) {
                     case .inline:
                         $0["env"] = environment.bindings
                     case .useBase(let base, let overrides):

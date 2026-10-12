@@ -17,10 +17,10 @@ import SWBTaskExecution
 /// Coverage for `EnvironmentBaseTable`, which decides how each command's
 /// environment is handed to llbuild.
 ///
-/// The invariant these tests protect is that a factored environment reconstitutes
+/// The invariant these tests protect is that a shared-base environment reconstitutes
 /// to *exactly* the original -- same values, same order -- because llbuild
 /// substitutes an override in place of the base's binding. If it did not, every
-/// command's signature would shift the first time a build took the factored path.
+/// command's signature would shift the first time a build took the shared-base path.
 @Suite
 fileprivate struct EnvironmentBaseTableTests {
     /// An environment of a representative shape: enough variables that overrides are
@@ -32,7 +32,7 @@ fileprivate struct EnvironmentBaseTableTests {
         }
     }
 
-    /// llbuild's effective environment for a factored command: the base, with
+    /// llbuild's effective environment for a command encoded against a base: the base, with
     /// overrides substituted in place and unknown keys appended. This mirrors
     /// `ShellCommand::getEffectiveEnv`, so the equivalence assertions below are
     /// about the same combination llbuild will perform.
@@ -68,7 +68,7 @@ fileprivate struct EnvironmentBaseTableTests {
     func identicalEnvironmentSendsNoOverrides() {
         let table = EnvironmentBaseTable(environments: [bindings(), bindings()])
 
-        guard case .useBase(let base, let overrides) = table.factoring(for: bindings()) else {
+        guard case .useBase(let base, let overrides) = table.encoding(for: bindings()) else {
             Issue.record("expected an identical environment to reuse the base")
             return
         }
@@ -85,7 +85,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let environment = bindings(["VAR_3": "mine", "VAR_7": "also-mine"])
         let table = EnvironmentBaseTable(environments: [baseEnvironment, environment])
 
-        guard case .useBase(_, let overrides) = table.factoring(for: environment) else {
+        guard case .useBase(_, let overrides) = table.encoding(for: environment) else {
             Issue.record("expected the second environment to reuse the base")
             return
         }
@@ -104,7 +104,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let environment = bindings(["VAR_0": "first-differs"])
         let table = EnvironmentBaseTable(environments: [baseEnvironment, environment])
 
-        guard case .useBase(_, let overrides) = table.factoring(for: environment) else {
+        guard case .useBase(_, let overrides) = table.encoding(for: environment) else {
             Issue.record("expected the second environment to reuse the base")
             return
         }
@@ -122,8 +122,8 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [environment, environment, reordered, reordered])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.factoring(for: environment) == .useBase(base: "env-base-0", overrides: []))
-        #expect(table.factoring(for: reordered) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: environment) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: reordered) == .useBase(base: "env-base-1", overrides: []))
     }
 
     /// A different key list gets its own base rather than inheriting one whose
@@ -133,19 +133,19 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [bindings(), bindings(), bindings(count: 13), bindings(count: 13)])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.factoring(for: bindings(count: 13)) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: bindings(count: 13)) == .useBase(base: "env-base-1", overrides: []))
     }
 
     /// A key list only one command uses is sent inline: a base has to be declared
-    /// in full, so factoring such an environment costs the whole of it again plus
+    /// in full, so sharing one for such an environment costs the whole of it again plus
     /// the reference.
     @Test
     func keyListUsedOnceIsSentInline() {
         let table = EnvironmentBaseTable(environments: [bindings(), bindings(count: 400)])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.factoring(for: bindings()) == .inline)
-        #expect(table.factoring(for: bindings(count: 400)) == .inline)
+        #expect(table.encoding(for: bindings()) == .inline)
+        #expect(table.encoding(for: bindings(count: 400)) == .inline)
     }
 
     /// Size is not the criterion -- two commands sharing even a single variable get
@@ -157,7 +157,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [environment, environment])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0"])
-        #expect(table.factoring(for: environment) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: environment) == .useBase(base: "env-base-0", overrides: []))
     }
 
     /// Names run consecutively over the bases actually declared, leaving no gap
@@ -171,15 +171,15 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [shared, shared, once, alsoShared, alsoShared])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.factoring(for: shared) == .useBase(base: "env-base-0", overrides: []))
-        #expect(table.factoring(for: once) == .inline)
-        #expect(table.factoring(for: alsoShared) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: shared) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: once) == .inline)
+        #expect(table.encoding(for: alsoShared) == .useBase(base: "env-base-1", overrides: []))
     }
 
     /// A duplicated key cannot survive the round trip -- a base holds one binding
     /// per key -- so such an environment is sent whole rather than silently
     /// collapsed. Every command sharing that key list must make the same choice,
-    /// which is why the table records the key list as unfactorable rather than just
+    /// which is why the table records the key list as unshareable rather than just
     /// declining to declare a base for it.
     @Test
     func duplicateKeysAreSentInline() {
@@ -187,16 +187,16 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [environment, environment])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.factoring(for: environment) == .inline)
+        #expect(table.encoding(for: environment) == .inline)
     }
 
-    /// An empty environment is nothing to factor.
+    /// An empty environment is nothing to share.
     @Test
     func emptyEnvironmentIsSentInline() {
         let table = EnvironmentBaseTable(environments: [[]])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.factoring(for: []) == .inline)
+        #expect(table.encoding(for: []) == .inline)
     }
 
     /// An environment the table was never built over is sent whole. Nothing plans a
@@ -207,19 +207,19 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [bindings(), bindings()])
 
         #expect(table.declaredBases.count == 1)
-        #expect(table.factoring(for: bindings(count: 20)) == .inline)
+        #expect(table.encoding(for: bindings(count: 20)) == .inline)
     }
 
     /// The table's assignments depend only on the order it was built in, not on the
     /// order it is queried in -- the property that keeps a manifest byte-identical
     /// across two constructions even though its commands are described in parallel.
     @Test
-    func factoringDoesNotDependOnQueryOrder() {
+    func encodingDoesNotDependOnQueryOrder() {
         let environments = [bindings(), bindings(["VAR_1": "a"]), bindings(["VAR_2": "b"])]
         let table = EnvironmentBaseTable(environments: environments)
 
-        let forward = environments.map { table.factoring(for: $0) }
-        let backward = environments.reversed().map { table.factoring(for: $0) }
+        let forward = environments.map { table.encoding(for: $0) }
+        let backward = environments.reversed().map { table.encoding(for: $0) }
         #expect(forward == Array(backward.reversed()))
     }
 }

@@ -18,20 +18,20 @@ import SWBUtil
 import SwiftBuildTestSupport
 
 /// End-to-end coverage for the shared environment bases that `EnvironmentBaseTable`
-/// factors out of the llbuild manifest.
+/// shares across the llbuild manifest.
 ///
-/// The unit tests in `EnvironmentBaseTableTests` cover the factoring itself; what
+/// The unit tests in `EnvironmentBaseTableTests` cover the encoding itself; what
 /// these add is that llbuild accepts the resulting manifest and reconstitutes the
 /// same environments from it. A mistake there would not show up as a parse error --
 /// it would show up as a build that never goes null, because every command's
 /// signature is computed over its effective environment.
 @Suite
 fileprivate struct EnvironmentBaseBuildOperationTests: CoreBasedTests {
-    /// A script phase is the reliable way to get environments worth factoring: script
+    /// A script phase is the reliable way to get environments worth sharing: script
     /// commands carry the whole build-settings environment, hundreds of variables
     /// that two scripts in the same target share almost entirely.
     @Test(.requireSDKs(.macOS))
-    func scriptEnvironmentsAreFactoredAndReconstituted() async throws {
+    func scriptEnvironmentsShareABaseAndReconstitute() async throws {
         // A temporary source root rather than the default: this builds for real and
         // then asserts the second build is null, so it must not inherit a build
         // database from whatever ran before it.
@@ -53,7 +53,7 @@ fileprivate struct EnvironmentBaseBuildOperationTests: CoreBasedTests {
                         buildPhases: [
                             TestSourcesBuildPhase(["main.c"]),
                             // Two scripts with the same environment but for one
-                            // variable, which is the shape the factoring is for.
+                            // variable, which is the shape the sharing is for.
                             TestShellScriptBuildPhase(name: "First", originalObjectID: "first", contents: "echo first > \"$SCRIPT_OUTPUT_FILE_0\"", outputs: ["$(DERIVED_FILE_DIR)/first.txt"]),
                             TestShellScriptBuildPhase(name: "Second", originalObjectID: "second", contents: "echo second > \"$SCRIPT_OUTPUT_FILE_0\"", outputs: ["$(DERIVED_FILE_DIR)/second.txt"]),
                         ]),
@@ -67,7 +67,7 @@ fileprivate struct EnvironmentBaseBuildOperationTests: CoreBasedTests {
                 results.checkNoDiagnostics()
 
                 let manifest = try results.readLLBuildManifestContents()
-                // The scripts are factored onto a base rather than carrying their
+                // The scripts are encoded against a base rather than carrying their
                 // environments whole.
                 #expect(manifest.contains(#""env-bases":{"#), Comment(rawValue: manifest))
                 #expect(manifest.contains(#""env-base":"env-base-0""#), Comment(rawValue: manifest))

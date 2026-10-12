@@ -17,7 +17,6 @@ Swift Build is structured in layers of framework targets, which is described in 
 - <doc:build-system-architecture>
 - <doc:dynamic-tasks>
 - <doc:indexing-support>
-- <doc:manifest-command-environments>
 - <doc:swift-driver>
 
 ### Development
