@@ -512,45 +512,59 @@ extension ConstructedTask {
         let allowMissingInputs = (ruleInfo.first == "PhaseScriptExecution" ? !SWBFeatureFlag.disableShellScriptAllowsMissingInputs.value : false)
             || ruleInfo.first == "ValidateDevelopmentAssets"
 
-        // Handle custom tasks.
-        //
-        // FIXME: This cast is unfortunate.
-        if let action = (execTask as! Task).action {
-            try builder.addCustomCommand(self, tool: Swift.type(of: action).toolIdentifier, inputs: inputs, outputs: outputs, deps: execTask.dependencyData, allowMissingInputs: allowMissingInputs, alwaysOutOfDate: alwaysExecuteTask, description: ruleInfo)
-            return
-        }
+        switch descriptionKind {
+        case .custom(let tool):
+            try builder.addCustomCommand(self, tool: tool, inputs: inputs, outputs: outputs, deps: execTask.dependencyData, allowMissingInputs: allowMissingInputs, alwaysOutOfDate: alwaysExecuteTask, description: ruleInfo)
 
-        // Otherwise, delegate based on the task type.
-        //
-        // FIXME: Move to custom tasks for these behaviors.
-        switch ruleInfo[0] {
-        case "MkDir":
+        case .mkdir:
             try builder.addMkdirCommand(self, inputs: inputs, outputs: outputs, description: ruleInfo)
 
-        case "SymLink":
-            try builder.addSymlinkCommand(self, contents: ruleInfo[2], inputs: inputs, outputs: outputs, description: ruleInfo)
+        case .symlink(let contents):
+            try builder.addSymlinkCommand(self, contents: contents, inputs: inputs, outputs: outputs, description: ruleInfo)
 
-        default:
+        case .subprocess:
             try builder.addSubprocessCommand(self, inputs: inputs, outputs: outputs, description: ruleInfo, commandLine: commandLine, environment: environment, workingDirectory: execTask.workingDirectory, allowMissingInputs: allowMissingInputs, alwaysOutOfDate: alwaysExecuteTask, deps: execTask.dependencyData, isUnsafeToInterrupt: type.isUnsafeToInterrupt, llbuildControlDisabled: execTask.llbuildControlDisabled)
         }
     }
 
+    /// Which kind of llbuild command this task is described as.
+    enum DescriptionKind {
+        case custom(tool: String)
+        case mkdir
+        case symlink(contents: String)
+        case subprocess
+    }
+
+    var descriptionKind: DescriptionKind {
+        // FIXME: This cast is unfortunate.
+        if let action = (execTask as! Task).action {
+            return .custom(tool: Swift.type(of: action).toolIdentifier)
+        }
+
+        // FIXME: Move to custom tasks for these behaviors.
+        switch ruleInfo[0] {
+        case "MkDir":
+            return .mkdir
+        case "SymLink":
+            return .symlink(contents: ruleInfo[2])
+        default:
+            return .subprocess
+        }
+    }
+
     /// The environment this task will hand llbuild as its command's environment, or
-    /// `nil` if it takes a path through `addToDescription` that has none.
+    /// `nil` if it is described as a kind of command that carries none.
     ///
     /// `EnvironmentBaseTable` is built from these before any command is described,
     /// so this has to agree with the routing above: an environment collected here
     /// that never reaches a command leaves an unreferenced base in the manifest, and
     /// one that reaches a command without being collected is merely sent inline.
-    /// Kept next to `addToDescription` so the two are read, and changed, together.
     var environmentToDescribe: EnvironmentBindings? {
-        // FIXME: This cast is unfortunate.
-        guard (execTask as! Task).action == nil else { return nil }
-        switch ruleInfo[0] {
-        case "MkDir", "SymLink":
-            return nil
-        default:
+        switch descriptionKind {
+        case .subprocess:
             return environment
+        case .custom, .mkdir, .symlink:
+            return nil
         }
     }
 }
