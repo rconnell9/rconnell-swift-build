@@ -935,16 +935,12 @@ fileprivate struct BuildDescriptionTests: CoreBasedTests {
         }
     }
 
-    /// Commands sharing an environment are encoded against a declared `env-base`, and
-    /// the one that differs sends only the binding that differs. The bases must be
-    /// declared ahead of `commands` in the manifest, since llbuild resolves each
-    /// `env-base` as it reads the command referencing it.
     @Test
-    func manifestSharesEnvironmentBases() async throws {
+    func manifestEncodesEnvironmentBases() async throws {
         let fs = PseudoFS()
         let type = MockTaskTypeDescription()
 
-        // Large enough to be worth a base at all, per `EnvironmentBaseTable`.
+        // Large enough to be worth a base at all
         func environment(_ overrides: [String: String] = [:]) -> [String: String] {
             var bindings = Dictionary(uniqueKeysWithValues: (0..<12).map { ("VAR_\($0)", "shared-\($0)") })
             bindings.merge(overrides) { _, new in new }
@@ -971,8 +967,7 @@ fileprivate struct BuildDescriptionTests: CoreBasedTests {
         _ = try #require(construct)
         let manifest = try fs.read(Path.root.join("tmp/signature.xcbuilddata/manifest.json")).bytes.asReadableString()
 
-        // One base for the key list all three share, declared with the values of the
-        // first task in sorted order.
+        // One base for the key list all three share
         let bindings = (0..<12).map { (index: Int) in "VAR_\(index)" }.sorted().map { key in "\"\(key)\":\"shared-\(key.dropFirst(4))\"" }.joined(separator: ",")
         #expect(manifest.contains("\"env-bases\":{\"env-base-0\":{\(bindings)}}"), Comment(rawValue: manifest))
 
