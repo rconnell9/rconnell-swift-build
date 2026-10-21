@@ -86,6 +86,20 @@ package final class Task: ExecutableTask, Serializable, Encodable {
         }
     }
 
+    /// The first element of ``ruleInfo``, without materializing the rest.
+    ///
+    /// An interned task rebuilds the whole array from the arena on every access to
+    /// `ruleInfo`, which is more than a caller that only wants to know the rule
+    /// type should pay.
+    package var ruleInfoFirst: String? {
+        switch storage {
+        case .direct(let directStorage):
+            return directStorage.ruleInfo.first
+        case .interned(let internedStorage):
+            return internedStorage.handles.ruleInfo.first.map { internedStorage.stringArena.lookup(handle: $0) }
+        }
+    }
+
     /// The command line of the task, starting with the executable to run in the subprocess.
     package var commandLine: [CommandLineArgument] {
         switch storage {
@@ -100,6 +114,29 @@ package final class Task: ExecutableTask, Serializable, Encodable {
                     return .path(Path(internedStorage.stringArena.lookup(handle: handle)))
                 case .parentPath(let handle):
                     return .parentPath(Path(internedStorage.stringArena.lookup(handle: handle)))
+                }
+            }
+        }
+    }
+
+    /// The command line as raw bytes, which is the form llbuild wants it in.
+    ///
+    /// Equivalent to `commandLine.map(\.asByteString)`, but without building the
+    /// intermediate `CommandLineArgument` array -- and, for an interned task, the
+    /// `Path` values inside it -- only to throw it away a line later.
+    package var commandLineAsByteStrings: [ByteString] {
+        switch storage {
+        case .direct(let directStorage):
+            return directStorage.commandLine.map(\.asByteString)
+        case .interned(let internedStorage):
+            return internedStorage.handles.commandLine.map {
+                switch $0 {
+                case .literal(let handle):
+                    return internedStorage.byteStringArena.lookup(handle: handle)
+                case .path(let handle):
+                    return ByteString(encodingAsUTF8: internedStorage.stringArena.lookup(handle: handle))
+                case .parentPath(let handle):
+                    return ByteString(encodingAsUTF8: Path(internedStorage.stringArena.lookup(handle: handle)).dirname.str)
                 }
             }
         }

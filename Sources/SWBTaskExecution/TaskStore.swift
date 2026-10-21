@@ -113,9 +113,27 @@ package final class FrozenTaskStore: Sendable {
     /// into before describing commands, so the environment bases the in-memory path
     /// derives are the ones the manifest would have declared.
     package func forEachTaskInLLBuildOrder(_ perform: (Task, LLBuildNodeList?) -> Void) {
-        for identifier in tasks.keys.sorted() {
+        for identifier in llbuildOrder {
             guard let task = tasks[identifier] else { continue }
             perform(task, llbuildNodeLists[identifier])
+        }
+    }
+
+    private let llbuildOrderCache: SWBMutex<[TaskIdentifier]?> = .init(nil)
+
+    /// The task identifiers in llbuild order, sorted once.
+    ///
+    /// Sorting a whole store is not free at the scale of a large workspace, and the
+    /// in-memory description walks this order twice -- once to collect environments,
+    /// once to emit -- so it is worth keeping rather than recomputing per walk.
+    private var llbuildOrder: [TaskIdentifier] {
+        llbuildOrderCache.withLock { cached in
+            if let cached {
+                return cached
+            }
+            let order = tasks.keys.sorted()
+            cached = order
+            return order
         }
     }
 

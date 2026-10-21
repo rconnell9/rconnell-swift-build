@@ -2255,11 +2255,8 @@ fileprivate func makeUniqueTargetId(_ target: ConfiguredTarget?) -> String {
     return target.platformDiscriminator != nil ? target.guid.stringValue : target.target.name
 }
 
-extension Task: CommandLineCheckable {
-    package var commandLineAsByteStrings: [ByteString] {
-        self.commandLine.map(\.asByteString)
-    }
-}
+// `commandLineAsByteStrings` is a member of `Task` itself.
+extension Task: CommandLineCheckable {}
 
 extension Task {
     package var ruleIdentifier: String {

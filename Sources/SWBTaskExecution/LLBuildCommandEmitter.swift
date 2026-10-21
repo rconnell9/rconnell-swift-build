@@ -89,17 +89,19 @@ protocol LLBuildCommandSink: AnyObject {
 /// tool. llbuild is order-insensitive here, so nothing depends on it; it only
 /// makes the two emitters readable side by side.
 ///
-/// `environmentBases` factors the shared bulk out of command environments; see
-/// ``EnvironmentBaseTable``. The caller must have declared its bases on `sink`
-/// already, and must have built it over `environmentToEmit` for every task it is
-/// about to emit -- an empty table simply sends every environment whole.
+/// `environment` is the command's environment with its encoding already decided;
+/// see ``ResolvedEnvironment`` and ``EnvironmentBaseTable``. The caller must have
+/// declared any base it names on `sink` already, and must have resolved it for
+/// every task whose `ruleInfo` reaches the general `shell` case below -- which is
+/// exactly the set ``Task/environmentToEmit`` describes. Passing `nil` sends no
+/// environment at all.
 ///
 /// Returns `false` if the command could not be created.
 func emitLLBuildCommand(
     task: Task,
     nodeList: LLBuildNodeList,
     bypassActualTasks: Bool,
-    environmentBases: EnvironmentBaseTable,
+    environment: ResolvedEnvironment?,
     into sink: any LLBuildCommandSink
 ) -> Bool {
     let name = task.identifier.rawValue
@@ -141,7 +143,7 @@ func emitLLBuildCommand(
 
     /// A `shell` command: the general case, and the only one with an environment,
     /// a command line, or signature adjustments.
-    func emitShell(commandLine: [ByteString], environment: EnvironmentBindings?, workingDirectory: Path?, alwaysOutOfDate: Bool, deps: DependencyDataStyle?, isUnsafeToInterrupt: Bool, llbuildControlDisabled: Bool) -> Bool {
+    func emitShell(commandLine: [ByteString], environment: ResolvedEnvironment?, workingDirectory: Path?, alwaysOutOfDate: Bool, deps: DependencyDataStyle?, isUnsafeToInterrupt: Bool, llbuildControlDisabled: Bool) -> Bool {
         var commandLine = commandLine
         if bypassActualTasks {
             commandLine = [ByteString(encodingAsUTF8: "/usr/bin/true")] + commandLine
@@ -150,7 +152,7 @@ func emitLLBuildCommand(
         return emit(tool: "shell", description: ruleInfo.joined(separator: " "), repairLast: false) {
             sink.setAttribute("args", byteValues: commandLine)
             if let environment {
-                switch environmentBases.encoding(for: environment.bindings) {
+                switch environment.encoding {
                 case .inline:
                     sink.setAttribute("env", pairs: environment.bindings)
                 case .useBase(let base, let overrides):
@@ -238,30 +240,40 @@ func emitLLBuildCommand(
         }
 
     default:
-        return emitShell(commandLine: task.commandLine.map(\.asByteString), environment: task.environmentToEmit, workingDirectory: task.workingDirectory, alwaysOutOfDate: task.alwaysExecuteTask, deps: task.dependencyData, isUnsafeToInterrupt: task.type.isUnsafeToInterrupt, llbuildControlDisabled: task.llbuildControlDisabled)
+        return emitShell(commandLine: task.commandLineAsByteStrings, environment: environment, workingDirectory: task.workingDirectory, alwaysOutOfDate: task.alwaysExecuteTask, deps: task.dependencyData, isUnsafeToInterrupt: task.type.isUnsafeToInterrupt, llbuildControlDisabled: task.llbuildControlDisabled)
     }
 }
 
 extension Task {
+    /// Whether this task's llbuild command carries an environment at all, decided
+    /// without materializing the environment -- or, for an interned task, the rule
+    /// info.
+    ///
+    /// True for exactly the tasks `emitLLBuildCommand` routes to its general
+    /// `shell` case, which is the only one with an environment.
+    var emitsEnvironment: Bool {
+        guard !isGate, action == nil else { return false }
+        switch ruleInfoFirst {
+        case "MkDir"?, "SymLink"?:
+            return false
+        default:
+            return true
+        }
+    }
+
     /// The environment this task's llbuild command will carry, or `nil` where it
     /// takes a path through `emitLLBuildCommand` that has none.
     ///
     /// ``EnvironmentBaseTable`` is built from these before any command is emitted,
     /// so the two have to agree: an environment collected here that never reaches a
     /// command leaves a base nothing references, and one that reaches a command
-    /// without having been collected is merely sent inline. `emitLLBuildCommand`
-    /// reads this rather than `environment` directly, so the two cannot drift.
+    /// without having been collected is merely sent inline.
     ///
     /// This mirrors `ConstructedTask.environmentToDescribe`, which answers the same
     /// question on the manifest side, from the planned task rather than the
     /// executable one.
     var environmentToEmit: EnvironmentBindings? {
-        guard !isGate, action == nil else { return nil }
-        switch ruleInfo[0] {
-        case "MkDir", "SymLink":
-            return nil
-        default:
-            return environment
-        }
+        guard emitsEnvironment else { return nil }
+        return environment
     }
 }

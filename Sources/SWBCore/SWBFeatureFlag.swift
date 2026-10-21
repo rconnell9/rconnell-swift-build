@@ -159,5 +159,8 @@ public enum SWBFeatureFlag {
 
     public static let enableAppSandboxConflictingValuesEmitsWarning = SWBFeatureFlagProperty("AppSandboxConflictingValuesEmitsWarning", defaultValue: true)
 
-    public static let useInMemoryLLBuildDescription = SWBFeatureFlagProperty("UseInMemoryLLBuildDescription", defaultValue: false)
+    /// Hand the build description to llbuild in memory rather than writing a
+    /// manifest for it to parse back. Set `UseInMemoryLLBuildDescription=NO` to
+    /// fall back to the manifest.
+    public static let useInMemoryLLBuildDescription = SWBFeatureFlagProperty("UseInMemoryLLBuildDescription", defaultValue: true)
 }

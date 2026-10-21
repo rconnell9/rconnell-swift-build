@@ -169,4 +169,28 @@ fileprivate struct EnvironmentBaseTableTests {
         let backward = environments.reversed().map { table.encoding(for: $0) }
         #expect(forward == Array(backward.reversed()))
     }
+
+    /// `build` is what the in-memory path uses, and it resolves each environment
+    /// from the candidate it matched while registering rather than looking it up
+    /// again. It has to land on the same encodings the per-query path does, or the
+    /// two description paths would configure llbuild differently.
+    @Test
+    func buildingResolvesTheSameEncodingsAsQuerying() {
+        let environments = [
+            bindings(),
+            bindings(["VAR_1": "a"]),
+            bindings(count: 5),
+            [],
+            bindings(count: 13),
+            bindings(count: 13),
+            bindings() + [("VAR_0", "again")],
+            bindings(["VAR_2": "b", "VAR_3": "c"]),
+        ]
+
+        let (table, encodings) = EnvironmentBaseTable.build(environments: environments)
+        let queried = EnvironmentBaseTable(environments: environments)
+
+        #expect(table.declaredBases.map { $0.name } == queried.declaredBases.map { $0.name })
+        #expect(encodings == environments.map { queried.encoding(for: $0) })
+    }
 }

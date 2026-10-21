@@ -51,14 +51,54 @@ package struct EnvironmentBaseTable: Sendable {
 
     private var candidateIndexByKeys: [[String]: Int] = [:]
 
+    /// The candidate the previous registration matched, consulted before
+    /// ``candidateIndexByKeys``.
+    ///
+    /// Worth a special case because a hit skips building the key list and hashing
+    /// it, comparing the names in place instead -- and equal names are usually the
+    /// same interned string, which makes that a pointer comparison rather than a
+    /// walk over the bytes. Environments are registered in task order, which groups
+    /// them by target, and commands within a target nearly always share a key list,
+    /// so this hits for most of a large build's environments.
+    private var lastRegistered: (keys: [String], index: Int)?
+
     package init() {}
 
-    /// Build a table over all of a build's environments.
+    /// Build a table over all of a build's environments, one per command.
     package init(environments: some Sequence<[(String, String)]>) {
         for bindings in environments {
-            register(bindings)
+            _ = register(bindings)
         }
         nameSharedBases()
+    }
+
+    /// Build a table over all of a build's environments, one per command, and
+    /// resolve each one's encoding in the same pass.
+    ///
+    /// Preferred over ``init(environments:)`` plus ``encoding(for:)`` per command.
+    /// Resolving an encoding on its own has to find the environment's candidate by
+    /// its keys, and that lookup hashes every variable name; doing it a second time
+    /// per command costs more than everything else building the table does. Here
+    /// each environment's candidate is simply remembered from when it was
+    /// registered.
+    ///
+    /// The returned encodings are in the order the environments were given.
+    package static func build(environments: [[(String, String)]]) -> (table: EnvironmentBaseTable, encodings: [EnvironmentEncoding]) {
+        var table = EnvironmentBaseTable()
+        var candidateIndices: [Int?] = []
+        candidateIndices.reserveCapacity(environments.count)
+        for bindings in environments {
+            candidateIndices.append(table.register(bindings))
+        }
+        table.nameSharedBases()
+
+        let encodings = zip(environments, candidateIndices).map { bindings, candidateIndex -> EnvironmentEncoding in
+            guard let candidateIndex, let name = table.candidates[candidateIndex].name else {
+                return .inline
+            }
+            return .useBase(base: name, overrides: table.computeOverrides(in: bindings, relativeTo: table.candidates[candidateIndex].bindings))
+        }
+        return (table, encodings)
     }
 
     /// The bases to declare, in the order they were first needed.
@@ -73,17 +113,30 @@ package struct EnvironmentBaseTable: Sendable {
         return .useBase(base: name, overrides: computeOverrides(in: bindings, relativeTo: candidate.bindings))
     }
 
-    private mutating func register(_ bindings: [(String, String)]) {
-        guard !bindings.isEmpty else { return }
+    /// Record one command's environment, returning the index of the candidate it
+    /// shares its keys with (`nil` for an empty environment, which gets no base).
+    private mutating func register(_ bindings: [(String, String)]) -> Int? {
+        guard !bindings.isEmpty else { return nil }
 
-        if let index = candidateIndex(forKeysOf: bindings) {
-            candidates[index].references += 1
-            return
+        if let lastRegistered, lastRegistered.keys.count == bindings.count,
+           zip(lastRegistered.keys, bindings).allSatisfy({ $0 == $1.0 }) {
+            candidates[lastRegistered.index].references += 1
+            return lastRegistered.index
         }
 
-        let unshareable = Set(bindings.lazy.map { $0.0 }).count != bindings.count
-        candidates.append(Candidate(bindings: bindings, name: nil, unshareable: unshareable, references: 1))
-        candidateIndexByKeys[bindings.map { $0.0 }] = candidates.count - 1
+        let keys = bindings.map { $0.0 }
+        let index: Int
+        if let existing = candidateIndexByKeys[keys] {
+            candidates[existing].references += 1
+            index = existing
+        } else {
+            let unshareable = Set(keys).count != keys.count
+            candidates.append(Candidate(bindings: bindings, name: nil, unshareable: unshareable, references: 1))
+            index = candidates.count - 1
+            candidateIndexByKeys[keys] = index
+        }
+        lastRegistered = (keys, index)
+        return index
     }
 
     private mutating func nameSharedBases() {
@@ -108,5 +161,23 @@ package struct EnvironmentBaseTable: Sendable {
             overrides.append(bindings[index])
         }
         return overrides
+    }
+}
+
+/// A command's environment together with the already-made decision of how to hand
+/// it to llbuild.
+///
+/// Exists so a command can be emitted without the emitter having to consult the
+/// table: resolving an encoding there means finding the environment's candidate by
+/// its keys, which hashes every variable name. See
+/// ``EnvironmentBaseTable/build(environments:)``, which resolves every command's
+/// encoding without that lookup.
+package struct ResolvedEnvironment: Sendable {
+    package let bindings: [(String, String)]
+    package let encoding: EnvironmentEncoding
+
+    package init(bindings: [(String, String)], encoding: EnvironmentEncoding) {
+        self.bindings = bindings
+        self.encoding = encoding
     }
 }

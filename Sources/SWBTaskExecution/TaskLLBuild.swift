@@ -71,20 +71,30 @@ extension BuildDescription {
         // manifest writer does. Built before any command is emitted, over the same
         // task order the emission walk below uses, because it is the registration
         // order that decides which environment's values each base is declared with.
+        //
+        // Each environment's encoding is resolved here too, in the same pass that
+        // builds the table, rather than per command during emission -- see
+        // ``EnvironmentBaseTable/build(environments:)``.
         var environments: [[(String, String)]] = []
         taskStore.forEachTaskInLLBuildOrder { task, _ in
-            if let environment = task.environmentToEmit {
-                environments.append(environment.bindings)
-            }
+            guard task.emitsEnvironment else { return }
+            environments.append(task.environment.bindings)
         }
-        let environmentBases = EnvironmentBaseTable(environments: environments)
+        let (environmentBases, environmentEncodings) = EnvironmentBaseTable.build(environments: environments)
         for (name, bindings) in environmentBases.declaredBases {
             sink.declareEnvironmentBase(name, bindings: bindings)
         }
+        let resolvedEnvironments = zip(environments, environmentEncodings).map { ResolvedEnvironment(bindings: $0, encoding: $1) }
 
         // One command per task, derived from the task itself + its stored node list,
         // in a deterministic order (see `forEachTaskInLLBuildOrder`).
+        //
+        // `resolvedEnvironments` is positional: the walk above appended one entry per
+        // task with `emitsEnvironment`, in this same order, so advancing an index over
+        // the same predicate pairs each command with its own environment -- no lookup
+        // and no key to hash.
         var ok = true
+        var nextEnvironment = 0
         taskStore.forEachTaskInLLBuildOrder { task, nodeList in
             guard ok else { return }
             guard let nodeList else {
@@ -93,7 +103,19 @@ extension BuildDescription {
                 ok = false
                 return
             }
-            if !emitLLBuildCommand(task: task, nodeList: nodeList, bypassActualTasks: bypassActualTasks, environmentBases: environmentBases, into: sink) {
+            var environment: ResolvedEnvironment? = nil
+            if task.emitsEnvironment {
+                guard nextEnvironment < resolvedEnvironments.count else {
+                    // The two walks disagreed, which they cannot do over one frozen
+                    // store; bail to the manifest rather than emit a command with the
+                    // wrong environment.
+                    ok = false
+                    return
+                }
+                environment = resolvedEnvironments[nextEnvironment]
+                nextEnvironment += 1
+            }
+            if !emitLLBuildCommand(task: task, nodeList: nodeList, bypassActualTasks: bypassActualTasks, environment: environment, into: sink) {
                 ok = false
             }
         }
