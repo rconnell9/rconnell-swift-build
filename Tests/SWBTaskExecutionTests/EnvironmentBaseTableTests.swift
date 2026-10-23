@@ -169,4 +169,68 @@ fileprivate struct EnvironmentBaseTableTests {
         let backward = environments.reversed().map { table.encoding(for: $0) }
         #expect(forward == Array(backward.reversed()))
     }
+
+    /// Resolving every environment in one pass has to produce exactly what building
+    /// the table and then asking it per command produces -- that equivalence is the
+    /// whole licence for `factor` to exist, since it is only there to avoid the
+    /// per-command lookup.
+    ///
+    /// Arguments cover what the registration fast path (which compares an
+    /// environment's keys against the previously registered ones in place, rather
+    /// than hashing them) can get wrong: consecutive repeats that should hit it,
+    /// interleaved key lists that should not, key lists differing only in length or
+    /// order, and environments that cannot share a base at all.
+    @Test(arguments: [
+        // Consecutive repeats, including values differing from the base's.
+        [0, 0, 0],
+        [0, 1, 1, 2],
+        // Interleaved, so no two neighbours share a key list.
+        [0, 3, 0, 3, 0],
+        // The same keys reordered, and a shorter key list -- neither can share a base
+        // with the 12-variable environment.
+        [0, 4, 0, 4],
+        [0, 5, 5, 0],
+        // A duplicate key, which makes a key list unshareable.
+        [6, 6, 0, 0],
+        // Key lists used once, which get no base.
+        [0, 0, 5, 4],
+        // Empty environments, which get no base, around ones that do.
+        [7, 0, 7, 0, 7],
+        [7, 7],
+    ] as [[Int]])
+    func factoringMatchesPerCommandEncoding(shape: [Int]) {
+        // Each element of `shape` selects one of the environments below, so a shape
+        // is a sequence of environments in registration order.
+        let catalog: [[(String, String)]] = [
+            bindings(),                                 // 0: the shared 12-variable environment
+            bindings(["VAR_3": "mine"]),                // 1: same keys, one value differing
+            bindings(["VAR_0": "a", "VAR_11": "b"]),    // 2: same keys, two values differing
+            bindings(count: 13),                        // 3: a different key list
+            Array(bindings().reversed()),               // 4: the same keys, reordered
+            bindings(count: 5),                         // 5: a shorter key list
+            bindings() + [("VAR_0", "again")],          // 6: a duplicate key, so unshareable
+            [],                                         // 7: empty
+        ]
+        let environments = shape.map { catalog[$0] }
+
+        let factoring = EnvironmentBaseTable.factor(environments: environments)
+        let table = EnvironmentBaseTable(environments: environments)
+
+        #expect(factoring.encodings == environments.map { table.encoding(for: $0) })
+        #expect(factoring.declaredBases.map { base in "\(base.name): \(base.bindings.map { "\($0.0)=\($0.1)" })" }
+                == table.declaredBases.map { base in "\(base.name): \(base.bindings.map { "\($0.0)=\($0.1)" })" })
+
+        // The factoring has to be usable, not merely self-consistent: every command's
+        // effective environment must still be what it started with.
+        for (environment, encoding) in zip(environments, factoring.encodings) {
+            switch encoding {
+            case .inline:
+                break
+            case .useBase(let name, let overrides):
+                let base = try? #require(factoring.declaredBases.first { $0.name == name }).bindings
+                #expect(effectiveEnvironment(base: base ?? [], overrides: overrides).map { "\($0.0)=\($0.1)" }
+                        == environment.map { "\($0.0)=\($0.1)" })
+            }
+        }
+    }
 }

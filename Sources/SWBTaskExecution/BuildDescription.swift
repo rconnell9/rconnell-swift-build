@@ -606,7 +606,15 @@ package final class BuildDescriptionBuilder {
     private let settingsPerTarget: [ConfiguredTarget: Settings]
 
     /// The shared environment bases the commands may reference.
-    private let environmentBases: EnvironmentBaseTable
+    private let environmentBases: [(name: String, bindings: [(String, String)])]
+
+    /// How each task's environment is sent, resolved up front by
+    /// ``EnvironmentBaseTable/factor(environments:)``.
+    ///
+    /// Keyed by task because commands are generated in parallel and in no
+    /// particular order, and because the alternative -- asking the table for an
+    /// encoding while emitting -- is the cost this exists to avoid.
+    private let environmentEncodings: [Ref<any PlannedTask>: EnvironmentEncoding]
 
     /// For processing Gate and Constructed Tasks in parallel.
     private let processTaskLock = SWBMutex(())
@@ -641,7 +649,8 @@ package final class BuildDescriptionBuilder {
         targetDependencies: [TargetDependencyRelationship],
         definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>],
         dependencyGraphDiagnostic: Diagnostic,
-        environmentBases: EnvironmentBaseTable = EnvironmentBaseTable(),
+        environmentBases: [(name: String, bindings: [(String, String)])] = [],
+        environmentEncodings: [Ref<any PlannedTask>: EnvironmentEncoding] = [:],
         workspace: Workspace
     ) {
         self.path = path
@@ -668,6 +677,7 @@ package final class BuildDescriptionBuilder {
         self.definingTargetsByModuleName = definingTargetsByModuleName
         self.dependencyGraphDiagnostic = dependencyGraphDiagnostic
         self.environmentBases = environmentBases
+        self.environmentEncodings = environmentEncodings
         self.taskStore = TaskStore()
     }
 
@@ -725,7 +735,7 @@ package final class BuildDescriptionBuilder {
 
         // The environment bases the commands above reference by name.
         var envBaseDefinitions: [String: ByteString] = [:]
-        for (name, bindings) in environmentBases.declaredBases {
+        for (name, bindings) in environmentBases {
             let stream = OutputByteStream()
             stream <<< Format.asJSON(bindings)
             envBaseDefinitions[name] = stream.bytes
@@ -1028,7 +1038,9 @@ package final class BuildDescriptionBuilder {
                 // This defaults to true, we'll omit to to save space
                 // $0["inherit-env"] = "true"
                 if let environment {
-                    switch environmentBases.encoding(for: environment.bindings) {
+                    // Resolved up front; see `environmentEncodings`. A task missing from
+                    // the map can always be sent whole.
+                    switch environmentEncodings[Ref(task)] ?? .inline {
                     case .inline:
                         $0["env"] = environment.bindings
                     case .useBase(let base, let overrides):
@@ -1176,7 +1188,21 @@ extension BuildDescription {
         // We need to sort on the stable identifiers in order to ensure the uniqueness of the sort.
         let sortedTasks = tasks.sorted{ $0.identifier < $1.identifier }
 
-        let environmentBases = EnvironmentBaseTable(environments: sortedTasks.lazy.compactMap { ($0 as? ConstructedTask)?.environmentToDescribe?.bindings })
+        // Factor the commands' environments, so variables many commands share are
+        // declared once rather than repeated per command.
+        //
+        // Resolved here, in one pass, rather than asked of the table per command
+        // while emitting: that question has to find an environment's base by its
+        // list of variable names, which means building and hashing that list. A
+        // large build's environments run to over a thousand variables each, so
+        // paying it per command dominates the cost of factoring in the first place.
+        let environmentsToFactor = sortedTasks.compactMap { task in
+            ((task as? ConstructedTask)?.environmentToDescribe?.bindings).map { (Ref(task), $0) }
+        }
+        let environmentFactoring = EnvironmentBaseTable.factor(environments: environmentsToFactor.lazy.map { $0.1 })
+        // Uniquing is immaterial: a repeated task is the same object, so it has the
+        // same environment and resolves to the same encoding.
+        let environmentEncodings = Dictionary(zip(environmentsToFactor.lazy.map { $0.0 }, environmentFactoring.encodings), uniquingKeysWith: { first, _ in first })
 
         let messageShortening = userPreferences.activityTextShorteningLevel
 
@@ -1467,7 +1493,8 @@ extension BuildDescription {
             targetDependencies: targetDependencies,
             definingTargetsByModuleName: definingTargetsByModuleName,
             dependencyGraphDiagnostic: dependencyGraphDiagnostic,
-            environmentBases: environmentBases,
+            environmentBases: environmentFactoring.declaredBases,
+            environmentEncodings: environmentEncodings,
             workspace: workspace
         )
         for (target, diagnostics) in diagnostics {
