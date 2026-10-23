@@ -36,77 +36,71 @@ package enum EnvironmentEncoding: Equatable {
 
 /// Shares the bulk of command environments, so variables many commands have in
 /// common are declared once rather than repeated
-package struct EnvironmentBaseTable: Sendable {
+///
+/// `Token` stands for a variable name or value. It need only compare equal exactly
+/// when the strings it stands for do, which lets a caller whose environments are
+/// already interned factor them without materializing a single string: the only
+/// questions the table asks of an environment are "does it declare the same names,
+/// in the same order, as one already seen?" and "which of its values differ from
+/// its base's?", and an interning arena's handles answer both. That matters at the
+/// scale this exists for, because almost none of a large build's bindings are
+/// ultimately sent -- WebKit's 4,213 command environments hold about five million
+/// bindings between them, and sharing them into bases is exactly what reduces that
+/// to a few hundred thousand.
+///
+/// Strings are therefore produced only where one is really going to be handed over:
+/// a declared base's bindings, a command's overrides, and an environment sent
+/// inline.
+package struct EnvironmentBaseTable<Token: Hashable & Sendable>: Sendable {
 
     private struct Candidate: Sendable {
-        let bindings: [(String, String)]
+        /// Held as tokens, so an environment that defines a key list but whose base
+        /// is never declared costs nothing to have kept.
+        let bindings: [(Token, Token)]
         var name: String?
         let unshareable: Bool
         var references: Int
     }
 
-    private static let minimumCommandsToShareABase = 2
+    private static var minimumCommandsToShareABase: Int { 2 }
+
+    private let materialize: @Sendable (Token) -> String
 
     private var candidates: [Candidate] = []
 
-    private var candidateIndexByKeys: [[String]: Int] = [:]
+    private var candidateIndexByKeys: [[Token]: Int] = [:]
 
     /// The candidate the previous registration matched, consulted before
     /// ``candidateIndexByKeys``.
     ///
     /// Worth a special case because a hit skips building the key list and hashing
-    /// it, comparing the names in place instead -- and equal names are usually the
-    /// same interned string, which makes that a pointer comparison rather than a
-    /// walk over the bytes. Environments are registered in task order, which groups
-    /// them by target, and commands within a target nearly always share a key list,
-    /// so this hits for most of a large build's environments.
-    private var lastRegistered: (keys: [String], index: Int)?
+    /// it, comparing the names in place instead. Environments are registered in task
+    /// order, which groups them by target, and commands within a target nearly
+    /// always share a key list, so this hits for most of a large build's
+    /// environments.
+    private var lastRegistered: (keys: [Token], index: Int)?
 
-    package init() {}
+    package init(materialize: @escaping @Sendable (Token) -> String) {
+        self.materialize = materialize
+    }
 
     /// Build a table over all of a build's environments, one per command.
-    package init(environments: some Sequence<[(String, String)]>) {
+    package init(environments: some Sequence<[(Token, Token)]>, materialize: @escaping @Sendable (Token) -> String) {
+        self.init(materialize: materialize)
         for bindings in environments {
             _ = register(bindings)
         }
         nameSharedBases()
     }
 
-    /// Build a table over all of a build's environments, one per command, and
-    /// resolve each one's encoding in the same pass.
-    ///
-    /// Preferred over ``init(environments:)`` plus ``encoding(for:)`` per command.
-    /// Resolving an encoding on its own has to find the environment's candidate by
-    /// its keys, and that lookup hashes every variable name; doing it a second time
-    /// per command costs more than everything else building the table does. Here
-    /// each environment's candidate is simply remembered from when it was
-    /// registered.
-    ///
-    /// The returned encodings are in the order the environments were given.
-    package static func build(environments: [[(String, String)]]) -> (table: EnvironmentBaseTable, encodings: [EnvironmentEncoding]) {
-        var table = EnvironmentBaseTable()
-        var candidateIndices: [Int?] = []
-        candidateIndices.reserveCapacity(environments.count)
-        for bindings in environments {
-            candidateIndices.append(table.register(bindings))
-        }
-        table.nameSharedBases()
-
-        let encodings = zip(environments, candidateIndices).map { bindings, candidateIndex -> EnvironmentEncoding in
-            guard let candidateIndex, let name = table.candidates[candidateIndex].name else {
-                return .inline
-            }
-            return .useBase(base: name, overrides: table.computeOverrides(in: bindings, relativeTo: table.candidates[candidateIndex].bindings))
-        }
-        return (table, encodings)
-    }
-
     /// The bases to declare, in the order they were first needed.
     package var declaredBases: [(name: String, bindings: [(String, String)])] {
-        candidates.lazy.compactMap { candidate in candidate.name.map { ($0, candidate.bindings) } }
+        candidates.compactMap { candidate in
+            candidate.name.map { ($0, candidate.bindings.map(materializeBinding)) }
+        }
     }
 
-    package func encoding(for bindings: [(String, String)]) -> EnvironmentEncoding {
+    package func encoding(for bindings: [(Token, Token)]) -> EnvironmentEncoding {
         guard let candidate = candidate(forKeysOf: bindings), let name = candidate.name else {
             return .inline
         }
@@ -115,7 +109,7 @@ package struct EnvironmentBaseTable: Sendable {
 
     /// Record one command's environment, returning the index of the candidate it
     /// shares its keys with (`nil` for an empty environment, which gets no base).
-    private mutating func register(_ bindings: [(String, String)]) -> Int? {
+    private mutating func register(_ bindings: [(Token, Token)]) -> Int? {
         guard !bindings.isEmpty else { return nil }
 
         if let lastRegistered, lastRegistered.keys.count == bindings.count,
@@ -147,37 +141,106 @@ package struct EnvironmentBaseTable: Sendable {
         }
     }
 
-    private func candidateIndex(forKeysOf bindings: [(String, String)]) -> Int? {
+    private func candidateIndex(forKeysOf bindings: [(Token, Token)]) -> Int? {
         candidateIndexByKeys[bindings.map { $0.0 }]
     }
 
-    private func candidate(forKeysOf bindings: [(String, String)]) -> Candidate? {
+    private func candidate(forKeysOf bindings: [(Token, Token)]) -> Candidate? {
         candidateIndex(forKeysOf: bindings).map { candidates[$0] }
     }
 
-    private func computeOverrides(in bindings: [(String, String)], relativeTo base: [(String, String)]) -> [(String, String)] {
+    private func materializeBinding(_ binding: (Token, Token)) -> (String, String) {
+        (materialize(binding.0), materialize(binding.1))
+    }
+
+    private func computeOverrides(in bindings: [(Token, Token)], relativeTo base: [(Token, Token)]) -> [(String, String)] {
         var overrides: [(String, String)] = []
         for index in bindings.indices where bindings[index].1 != base[index].1 {
-            overrides.append(bindings[index])
+            overrides.append(materializeBinding(bindings[index]))
         }
         return overrides
     }
 }
 
-/// A command's environment together with the already-made decision of how to hand
-/// it to llbuild.
+extension EnvironmentBaseTable where Token == String {
+    /// A table over environments already held as strings, which need no
+    /// materializing.
+    package init() {
+        self.init(materialize: { $0 })
+    }
+
+    /// Build a table over all of a build's environments, one per command.
+    package init(environments: some Sequence<[(String, String)]>) {
+        self.init(environments: environments, materialize: { $0 })
+    }
+}
+
+/// The product of factoring a build's environments: the bases to declare, and what
+/// each command should send.
+package struct EnvironmentFactoring: Sendable {
+    /// The bases to declare before any command references one, in the order they
+    /// were first needed.
+    package let declaredBases: [(name: String, bindings: [(String, String)])]
+
+    /// What each command should send, in the order the environments were given.
+    package let environments: [ResolvedEnvironment]
+}
+
+extension EnvironmentBaseTable {
+    /// Factor a build's environments, resolving what each command sends in the same
+    /// pass that builds the table.
+    ///
+    /// Preferred over ``init(environments:materialize:)`` plus ``encoding(for:)``
+    /// per command. Resolving an encoding on its own has to find the environment's
+    /// candidate by its keys, and that lookup hashes every variable name; doing it a
+    /// second time per command costs more than everything else building the table
+    /// does. Here each environment's candidate is simply remembered from when it was
+    /// registered.
+    ///
+    /// Callers need not agree on how they factor the same build. llbuild hashes a
+    /// command's *effective* environment rather than the base and overrides it was
+    /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
+    /// into a base, or declining to, cannot change a command's signature.
+    package static func factor(environments: [[(Token, Token)]], materialize: @escaping @Sendable (Token) -> String) -> EnvironmentFactoring {
+        var table = EnvironmentBaseTable(materialize: materialize)
+        var candidateIndices: [Int?] = []
+        candidateIndices.reserveCapacity(environments.count)
+        for bindings in environments {
+            candidateIndices.append(table.register(bindings))
+        }
+        table.nameSharedBases()
+
+        let resolved = zip(environments, candidateIndices).map { bindings, candidateIndex -> ResolvedEnvironment in
+            guard let candidateIndex, let name = table.candidates[candidateIndex].name else {
+                // Sent whole, so this is the one case that pays to materialize an
+                // entire environment.
+                return ResolvedEnvironment(bindings: bindings.map(table.materializeBinding), base: nil)
+            }
+            return ResolvedEnvironment(bindings: table.computeOverrides(in: bindings, relativeTo: table.candidates[candidateIndex].bindings), base: name)
+        }
+        return EnvironmentFactoring(declaredBases: table.declaredBases, environments: resolved)
+    }
+}
+
+/// What a command sends for its environment, with the decision of how to hand it to
+/// llbuild already made.
 ///
 /// Exists so a command can be emitted without the emitter having to consult the
 /// table: resolving an encoding there means finding the environment's candidate by
 /// its keys, which hashes every variable name. See
-/// ``EnvironmentBaseTable/build(environments:)``, which resolves every command's
-/// encoding without that lookup.
+/// ``EnvironmentBaseTable/factor(environments:materialize:)``, which resolves every
+/// command's environment without that lookup.
 package struct ResolvedEnvironment: Sendable {
+    /// The bindings to send, which for a command pointed at a base are only those
+    /// differing from it.
     package let bindings: [(String, String)]
-    package let encoding: EnvironmentEncoding
 
-    package init(bindings: [(String, String)], encoding: EnvironmentEncoding) {
+    /// The base to point the command at, or `nil` to send ``bindings`` as the whole
+    /// environment.
+    package let base: String?
+
+    package init(bindings: [(String, String)], base: String?) {
         self.bindings = bindings
-        self.encoding = encoding
+        self.base = base
     }
 }

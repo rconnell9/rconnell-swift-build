@@ -113,25 +113,36 @@ package final class FrozenTaskStore: Sendable {
     /// into before describing commands, so the environment bases the in-memory path
     /// derives are the ones the manifest would have declared.
     package func forEachTaskInLLBuildOrder(_ perform: (Task, LLBuildNodeList?) -> Void) {
-        for identifier in llbuildOrder {
-            guard let task = tasks[identifier] else { continue }
-            perform(task, llbuildNodeLists[identifier])
+        for (task, nodeList) in llbuildOrder {
+            perform(task, nodeList)
         }
     }
 
-    private let llbuildOrderCache: SWBMutex<[TaskIdentifier]?> = .init(nil)
+    /// The arena the tasks' interned storage draws on, for a caller resolving
+    /// handles it took from ``Task/environmentBindingHandles``.
+    package var internedStringArena: FrozenStringArena {
+        stringArena
+    }
 
-    /// The task identifiers in llbuild order, sorted once.
+    private let llbuildOrderCache: SWBMutex<[(Task, LLBuildNodeList?)]?> = .init(nil)
+
+    /// The tasks in llbuild order, each with the node list recorded for it,
+    /// resolved once.
     ///
-    /// Sorting a whole store is not free at the scale of a large workspace, and the
-    /// in-memory description walks this order twice -- once to collect environments,
-    /// once to emit -- so it is worth keeping rather than recomputing per walk.
-    private var llbuildOrder: [TaskIdentifier] {
+    /// Sorting a whole store is not free at the scale of a large workspace, and
+    /// neither is looking each task and node list back up: task identifiers are
+    /// long strings, so the two dictionary lookups per task cost more than the rest
+    /// of the walk does. The in-memory description walks this order twice -- once to
+    /// factor environments, once to emit -- so it is worth keeping rather than
+    /// recomputing per walk.
+    private var llbuildOrder: [(Task, LLBuildNodeList?)] {
         llbuildOrderCache.withLock { cached in
             if let cached {
                 return cached
             }
-            let order = tasks.keys.sorted()
+            let order = tasks.keys.sorted().compactMap { identifier in
+                tasks[identifier].map { ($0, llbuildNodeLists[identifier]) }
+            }
             cached = order
             return order
         }

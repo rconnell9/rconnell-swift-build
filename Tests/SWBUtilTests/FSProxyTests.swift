@@ -264,6 +264,35 @@ import SystemPackage
         }
     }
 
+    /// Writing more than `INT_MAX` bytes has to be split across several `write`
+    /// calls, because Darwin rejects a count above `INT_MAX` outright with `EINVAL`
+    /// rather than writing as much as it can.
+    ///
+    /// Reachable in practice, and the symptom is silent: the build description's
+    /// `task-store.msgpack` for WebKit's index build is 2.16 GB, and writing it
+    /// used to fail having created an empty file, leaving a description that could
+    /// never be loaded again.
+    ///
+    /// Allocates and writes just over 2 GiB, hence not run in CI.
+    @Test(.disabled(if: getEnvironmentVariable("CI") != nil, "Test writes more than 2 GiB, too expensive to run in CI"))
+    func localWriteFileLargerThanMaxSingleWrite() throws {
+        try withTemporaryDirectory { tmpDir in
+            let count = Int(Int32.max) + 1
+            let testDataPath = tmpDir.join("test-data.bin")
+            try localFS.write(testDataPath, contents: ByteString([UInt8](repeating: 0xab, count: count)))
+
+            #expect(try localFS.getFileInfo(testDataPath).size == Int64(count))
+
+            // Spot-check the far end rather than reading the whole file back: a
+            // mis-split would land here, and comparing 2 GiB would double the cost.
+            let tail = try localFS.read(testDataPath) { handle in
+                try handle.seek(toOffset: UInt64(count - 3))
+                return try handle.read(upToCount: 3) ?? Data()
+            }
+            #expect(Array(tail) == [0xab, 0xab, 0xab])
+        }
+    }
+
     @Test
     func localAppendFile() throws {
         try withTemporaryDirectory { tmpDir in

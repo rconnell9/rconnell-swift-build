@@ -536,11 +536,32 @@ class LocalFS: FSProxy, @unchecked Sendable {
         try Data(contentsOf: URL(fileURLWithPath: path.str), options: .alwaysMapped)
     }
 
+    /// The largest amount handed to a single `write`.
+    ///
+    /// Darwin rejects a `write` whose count exceeds `INT_MAX` outright with
+    /// `EINVAL`, rather than writing what it can, and `FileDescriptor.writeAll`
+    /// passes the whole remaining buffer in one call -- so without chunking, a
+    /// write of more than 2 GiB fails having written nothing. Large builds reach
+    /// that: WebKit's index-build task store is over 2 GiB.
+    private static let writeChunkSize = 1 << 30
+
     private func _write(_ path: Path, contents: ByteString, mode: FileDescriptor.AccessMode, options: FileDescriptor.OpenOptions, permissions: FilePermissions?) throws {
         do {
             let fd = try FileDescriptor.safeOpen(FilePath(path.str), mode, options: options, permissions: permissions)
             _ = try fd.closeAfter {
-                try fd.writeAll(contents)
+                let wroteInChunks = try contents.withContiguousStorageIfAvailable { buffer -> Bool in
+                    let raw = UnsafeRawBufferPointer(buffer)
+                    var offset = 0
+                    while offset < raw.count {
+                        let end = min(offset + Self.writeChunkSize, raw.count)
+                        try fd.writeAll(UnsafeRawBufferPointer(rebasing: raw[offset..<end]))
+                        offset = end
+                    }
+                    return true
+                }
+                if wroteInChunks == nil {
+                    try fd.writeAll(contents)
+                }
             }
         } catch let error as Errno {
             throw POSIXError(error.rawValue)

@@ -533,6 +533,67 @@ fileprivate struct BuildDescriptionTests: CoreBasedTests {
         }
     }
 
+    /// A `.cachedOnly` request carries an ID rather than a plan, so it cannot fall back to re-planning the way
+    /// `.newOrCached` does: if the serialized description can't be read, the request fails. Index clients reach this
+    /// path (`getIndexBuildDescriptionFromID`, behind `GetIndexingFileSettingsMsg`), so an unreadable description on
+    /// disk surfaces as a failure to produce per-file compiler arguments once the in-memory cache no longer holds it.
+    ///
+    /// That is what made the 2 GiB limit in `FSProxy.write` worth chasing down (see
+    /// `FSProxyTests.localWriteFileLargerThanMaxSingleWrite`): a task store above that size was left as an empty file,
+    /// and `serializeBuildDescription` deliberately swallows write errors.
+    @Test(.requireSDKs(.macOS))
+    func cachedOnlyRequestFailsIfSerializedTaskStoreIsUnreadable() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            try await withAsyncDeferrable { deferrable in
+                let workspace = try await TestWorkspace(
+                    "Test",
+                    sourceRoot: tmpDirPath,
+                    projects: [
+                        TestProject(
+                            "aProject",
+                            groupTree: TestGroup("Sources", children: [TestFile("a.c")]),
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            targets: [
+                                TestStandardTarget("Tool", type: .commandLineTool, buildPhases: [TestSourcesBuildPhase(["a.c"])]),
+                            ])
+                    ]).load(getCore())
+
+                let fs = PseudoFS()
+                let manager = BuildDescriptionManager(fs: fs, buildDescriptionMemoryCacheEvictionPolicy: .never)
+                await deferrable.addBlock { await manager.waitForBuildDescriptionSerialization() }
+
+                let planRequest = try await self.planRequest(for: workspace, activeRunDestination: .macOS, fs: fs, includingTargets: { _ in true })
+                let clientDelegate = MockTestTaskPlanningClientDelegate(hostOS: planRequest.workspaceContext.core.hostOperatingSystem)
+                let info = try #require(try await manager.getNewOrCachedBuildDescription(planRequest, clientDelegate: clientDelegate))
+                await manager.waitForBuildDescriptionSerialization()
+
+                let id = info.buildDescription.ID
+                let taskStorePath = info.buildDescription.taskStorePath
+                #expect(try fs.getFileInfo(taskStorePath).size > 0)
+
+                // Each load goes through a fresh manager, so it has to come off disk — modelling the real service,
+                // whose in-memory cache is cost-limited and so evicts a large description like an index build's.
+                func loadFromDisk() async throws -> BuildDescriptionRetrievalInfo? {
+                    let request = BuildDescriptionManager.BuildDescriptionRequest.cachedOnly(id, request: planRequest.buildRequest, buildRequestContext: planRequest.buildRequestContext, workspaceContext: planRequest.workspaceContext, retain: false)
+                    let manager = BuildDescriptionManager(fs: fs, buildDescriptionMemoryCacheEvictionPolicy: .never)
+                    await deferrable.addBlock { await manager.waitForBuildDescriptionSerialization() }
+                    return try await manager.getNewOrCachedBuildDescription(request, clientDelegate: clientDelegate, constructionDelegate: MockTestBuildDescriptionConstructionDelegate())
+                }
+
+                let loaded = try await loadFromDisk()
+                #expect(loaded?.buildDescription.ID == id)
+                #expect(loaded?.source == .onDiskCache)
+
+                // The state a failed task store write leaves behind: the description package exists and looks
+                // complete, but the store within it is empty.
+                try fs.write(taskStorePath, contents: ByteString())
+                await #expect(throws: (any Error).self) {
+                    try await loadFromDisk()
+                }
+            }
+        }
+    }
+
     @Test(.requireSDKs(.macOS))
     func bundleWithNoSources() async throws {
         try await withTemporaryDirectory { tmpDirPath in

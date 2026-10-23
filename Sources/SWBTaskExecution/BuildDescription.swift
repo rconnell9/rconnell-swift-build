@@ -626,7 +626,7 @@ package final class BuildDescriptionBuilder {
     private let settingsPerTarget: [ConfiguredTarget: Settings]
 
     /// The shared environment bases the commands may reference.
-    private let environmentBases: EnvironmentBaseTable
+    private let environmentBases: EnvironmentBaseTable<String>
 
     /// For processing Gate and Constructed Tasks in parallel.
     private let processTaskLock = SWBMutex(())
@@ -661,7 +661,7 @@ package final class BuildDescriptionBuilder {
         targetDependencies: [TargetDependencyRelationship],
         definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>],
         dependencyGraphDiagnostic: Diagnostic,
-        environmentBases: EnvironmentBaseTable = EnvironmentBaseTable(),
+        environmentBases: EnvironmentBaseTable<String> = EnvironmentBaseTable(),
         workspace: Workspace
     ) {
         self.path = path

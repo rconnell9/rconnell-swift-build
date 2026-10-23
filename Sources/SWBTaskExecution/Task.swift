@@ -170,6 +170,25 @@ package final class Task: ExecutableTask, Serializable, Encodable {
         }
     }
 
+    /// The task's environment as interning-arena handles, which compare equal
+    /// exactly when the strings they stand for do.
+    ///
+    /// `nil` for a directly-stored task, whose environment is only ever held as
+    /// strings. Every task in a ``FrozenTaskStore`` is interned.
+    ///
+    /// Lets a caller that only needs to *compare* environments -- see
+    /// ``EnvironmentBaseTable`` -- avoid ``environment``, which materializes every
+    /// binding out of the arena. On a workspace the size of WebKit's that is the
+    /// difference between a few hundred thousand strings and five million.
+    package var environmentBindingHandles: [(StringArena.Handle, StringArena.Handle)]? {
+        switch storage {
+        case .direct:
+            return nil
+        case .interned(let internedStorage):
+            return internedStorage.handles.environmentBindings
+        }
+    }
+
     /// The directory in which the task should run.
     package let workingDirectory: Path
 

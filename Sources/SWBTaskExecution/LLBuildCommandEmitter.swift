@@ -152,15 +152,14 @@ func emitLLBuildCommand(
         return emit(tool: "shell", description: ruleInfo.joined(separator: " "), repairLast: false) {
             sink.setAttribute("args", byteValues: commandLine)
             if let environment {
-                switch environment.encoding {
-                case .inline:
-                    sink.setAttribute("env", pairs: environment.bindings)
-                case .useBase(let base, let overrides):
+                if let base = environment.base {
                     sink.setEnvironmentBase(base)
-                    // Sending nothing means the base is the whole environment.
-                    if !overrides.isEmpty {
-                        sink.setAttribute("env", pairs: overrides)
-                    }
+                }
+                // For a command pointed at a base these are only the bindings that
+                // differ from it, and sending none means the base is the whole
+                // environment.
+                if !environment.bindings.isEmpty {
+                    sink.setAttribute("env", pairs: environment.bindings)
                 }
             }
             if allowMissingInputs {

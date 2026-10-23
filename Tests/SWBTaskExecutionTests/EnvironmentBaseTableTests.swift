@@ -13,6 +13,7 @@
 import Testing
 
 import SWBTaskExecution
+import SWBUtil
 
 @Suite
 fileprivate struct EnvironmentBaseTableTests {
@@ -22,6 +23,22 @@ fileprivate struct EnvironmentBaseTableTests {
             let key = "VAR_\(index)"
             return (key, overrides[key] ?? "shared-\(index)")
         }
+    }
+
+    /// A spread of environments covering the cases the factoring distinguishes:
+    /// shared key lists, a one-off, an empty environment, a duplicate key, and
+    /// differing values over a shared list.
+    private var assortedEnvironments: [[(String, String)]] {
+        [
+            bindings(),
+            bindings(["VAR_1": "a"]),
+            bindings(count: 5),
+            [],
+            bindings(count: 13),
+            bindings(count: 13),
+            bindings() + [("VAR_0", "again")],
+            bindings(["VAR_2": "b", "VAR_3": "c"]),
+        ]
     }
 
     /// llbuild's effective environment for a command encoded against a base
@@ -170,27 +187,53 @@ fileprivate struct EnvironmentBaseTableTests {
         #expect(forward == Array(backward.reversed()))
     }
 
-    /// `build` is what the in-memory path uses, and it resolves each environment
+    /// `factor` is what the in-memory path uses, and it resolves each environment
     /// from the candidate it matched while registering rather than looking it up
     /// again. It has to land on the same encodings the per-query path does, or the
     /// two description paths would configure llbuild differently.
     @Test
-    func buildingResolvesTheSameEncodingsAsQuerying() {
-        let environments = [
-            bindings(),
-            bindings(["VAR_1": "a"]),
-            bindings(count: 5),
-            [],
-            bindings(count: 13),
-            bindings(count: 13),
-            bindings() + [("VAR_0", "again")],
-            bindings(["VAR_2": "b", "VAR_3": "c"]),
-        ]
+    func factoringResolvesTheSameEncodingsAsQuerying() {
+        let environments = assortedEnvironments
 
-        let (table, encodings) = EnvironmentBaseTable.build(environments: environments)
+        let factoring = EnvironmentBaseTable.factor(environments: environments, materialize: { $0 })
         let queried = EnvironmentBaseTable(environments: environments)
 
-        #expect(table.declaredBases.map { $0.name } == queried.declaredBases.map { $0.name })
-        #expect(encodings == environments.map { queried.encoding(for: $0) })
+        #expect(factoring.declaredBases.map { $0.name } == queried.declaredBases.map { $0.name })
+        let factored = factoring.environments.map { resolved in
+            resolved.base.map { EnvironmentEncoding.useBase(base: $0, overrides: resolved.bindings) } ?? .inline
+        }
+        #expect(factored == environments.map { queried.encoding(for: $0) })
+
+        // An environment with no base is sent whole, which the encoding above does
+        // not capture: `.inline` carries no bindings.
+        for (resolved, environment) in zip(factoring.environments, environments) where resolved.base == nil {
+            #expect(resolved.bindings.elementsEqual(environment, by: ==))
+        }
+    }
+
+    /// The in-memory path factors on interning-arena handles rather than on the
+    /// strings themselves, which is only sound because an arena hands out one
+    /// handle per distinct string -- so two handles are equal exactly when the
+    /// strings they stand for are. Factoring the same environments both ways has to
+    /// agree, bindings included.
+    @Test
+    func factoringOnHandlesMatchesFactoringOnStrings() {
+        let environments = assortedEnvironments
+        let arena = StringArena()
+        let handleEnvironments = environments.map { $0.map { (arena.intern($0.0), arena.intern($0.1)) } }
+        let frozen = arena.freeze()
+
+        let viaStrings = EnvironmentBaseTable.factor(environments: environments, materialize: { $0 })
+        let viaHandles = EnvironmentBaseTable.factor(environments: handleEnvironments, materialize: { frozen.lookup(handle: $0) })
+
+        #expect(viaHandles.declaredBases.map { $0.name } == viaStrings.declaredBases.map { $0.name })
+        for (handles, strings) in zip(viaHandles.declaredBases, viaStrings.declaredBases) {
+            #expect(handles.bindings.elementsEqual(strings.bindings, by: ==))
+        }
+
+        #expect(viaHandles.environments.map { $0.base } == viaStrings.environments.map { $0.base })
+        for (handles, strings) in zip(viaHandles.environments, viaStrings.environments) {
+            #expect(handles.bindings.elementsEqual(strings.bindings, by: ==))
+        }
     }
 }

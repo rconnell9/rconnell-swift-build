@@ -67,24 +67,49 @@ extension BuildDescription {
 
         let sink = LLBuildBuilderCommandSink(builder: builder)
 
-        // Factor the shared bulk out of the command environments, exactly as the
-        // manifest writer does. Built before any command is emitted, over the same
-        // task order the emission walk below uses, because it is the registration
-        // order that decides which environment's values each base is declared with.
+        // Factor the shared bulk out of the command environments, so variables many
+        // commands have in common are declared once rather than repeated. Done
+        // before any command is emitted because llbuild resolves a command's
+        // `env-base` by name as the command is configured, so the base has to exist
+        // by then. Walked in the same task order the emission walk below uses,
+        // because it is the registration order that decides which environment's
+        // values each base is declared with.
         //
-        // Each environment's encoding is resolved here too, in the same pass that
-        // builds the table, rather than per command during emission -- see
-        // ``EnvironmentBaseTable/build(environments:)``.
-        var environments: [[(String, String)]] = []
+        // Factored on the interning arena's handles rather than on strings. A large
+        // build's environments are enormous taken together -- WebKit's 4,213 of them
+        // hold about five million bindings -- but nearly every binding is shared, so
+        // it travels once inside a base and is never needed on its own. Comparing
+        // handles settles the sharing without materializing any of them; see
+        // ``EnvironmentBaseTable``.
+        var handleEnvironments: [[(StringArena.Handle, StringArena.Handle)]] = []
+        var allInterned = true
         taskStore.forEachTaskInLLBuildOrder { task, _ in
-            guard task.emitsEnvironment else { return }
-            environments.append(task.environment.bindings)
+            guard allInterned, task.emitsEnvironment else { return }
+            guard let handles = task.environmentBindingHandles else {
+                allInterned = false
+                return
+            }
+            handleEnvironments.append(handles)
         }
-        let (environmentBases, environmentEncodings) = EnvironmentBaseTable.build(environments: environments)
-        for (name, bindings) in environmentBases.declaredBases {
+        let factoring: EnvironmentFactoring
+        if allInterned {
+            let arena = taskStore.internedStringArena
+            factoring = EnvironmentBaseTable.factor(environments: handleEnvironments, materialize: { arena.lookup(handle: $0) })
+        } else {
+            // Every task in a frozen store is interned today, so this is only here so
+            // that a store which stopped interning would still be described
+            // correctly, just without the saving above.
+            var stringEnvironments: [[(String, String)]] = []
+            taskStore.forEachTaskInLLBuildOrder { task, _ in
+                guard task.emitsEnvironment else { return }
+                stringEnvironments.append(task.environment.bindings)
+            }
+            factoring = EnvironmentBaseTable.factor(environments: stringEnvironments, materialize: { $0 })
+        }
+        for (name, bindings) in factoring.declaredBases {
             sink.declareEnvironmentBase(name, bindings: bindings)
         }
-        let resolvedEnvironments = zip(environments, environmentEncodings).map { ResolvedEnvironment(bindings: $0, encoding: $1) }
+        let resolvedEnvironments = factoring.environments
 
         // One command per task, derived from the task itself + its stored node list,
         // in a deterministic order (see `forEachTaskInLLBuildOrder`).
@@ -207,7 +232,13 @@ final class LLBuildBuilderCommandSink: LLBuildCommandSink {
     }
 
     func setAttribute(_ name: String, byteValues: [ByteString]) {
-        builder.setCommandAttribute(open, name: name, values: byteValues.map { $0.asString })
+        // Handed over as bytes rather than through `String`. `llb_data_t` carries a
+        // length, so llbuild takes each element as it stands -- which both keeps
+        // arguments that are not valid UTF-8 byte-exact (the manifest path escapes
+        // them verbatim, and routing them through `String` would replace them with
+        // U+FFFD, changing what runs and collapsing distinct command lines onto one
+        // signature) and avoids a `String` allocation per argument.
+        builder.setCommandAttribute(open, name: name, byteValues: byteValues)
     }
 
     func setAttribute(_ name: String, pairs: [(String, String)]) {
