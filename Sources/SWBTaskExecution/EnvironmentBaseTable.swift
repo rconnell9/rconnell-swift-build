@@ -11,7 +11,6 @@
 //===----------------------------------------------------------------------===//
 
 package import SWBCore
-import SWBUtil
 
 /// How a single command's environment should be handed to llbuild
 package enum EnvironmentEncoding: Equatable {
@@ -67,14 +66,13 @@ package struct EnvironmentBaseTable: Sendable {
 
     /// Build a table over all of a build's environments.
     package init(environments: some Sequence<(task: TaskIdentifier, environment: EnvironmentBindings)>) {
-        // Which key lists are shared by enough commands to be worth declaring is not
-        // known until all of them have been registered, so what each command matched
-        // is held onto and the references are resolved in a second pass.
         var registered: [(task: TaskIdentifier, candidate: Int, positions: [Int])] = []
+
         for (task, environment) in environments {
             guard let candidate = register(environment.bindings) else { continue }
             registered.append((task, candidate, differingPositions(in: environment.bindings, relativeTo: candidates[candidate].bindings)))
         }
+
         nameSharedBases()
 
         for entry in registered {
@@ -88,12 +86,6 @@ package struct EnvironmentBaseTable: Sendable {
         candidates.lazy.compactMap { candidate in candidate.declaredIndex.map { (Self.name(ofBase: $0), candidate.bindings) } }
     }
 
-    /// How this command's environment should be sent.
-    ///
-    /// Callers need not agree on how they factor the same build. llbuild hashes a
-    /// command's *effective* environment rather than the base and overrides it was
-    /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
-    /// into a base, or declining to, cannot change a command's signature.
     package func encoding(for task: TaskIdentifier, environment: EnvironmentBindings) -> EnvironmentEncoding {
         guard let reference = baseReference(for: task) else {
             return .inline
@@ -102,10 +94,6 @@ package struct EnvironmentBaseTable: Sendable {
         return .useBase(base: Self.name(ofBase: reference.index), overrides: reference.positions.map { bindings[$0] })
     }
 
-    /// The base this command's environment is sent against.
-    ///
-    /// `nil` for a command that has no base, including one the table was not built
-    /// over -- whose environment is then sent whole rather than mis-encoded.
     package func baseReference(for task: TaskIdentifier) -> BaseReference? {
         baseReferenceByTask[task]
     }
@@ -114,8 +102,6 @@ package struct EnvironmentBaseTable: Sendable {
         "env-base-\(index)"
     }
 
-    /// Record one command's environment, returning the index of the candidate it
-    /// shares its keys with (`nil` for an empty environment, which gets no base).
     private mutating func register(_ bindings: [(String, String)]) -> Int? {
         guard !bindings.isEmpty else { return nil }
 
