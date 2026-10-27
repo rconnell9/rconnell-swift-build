@@ -170,10 +170,10 @@ fileprivate struct EnvironmentBaseTableTests {
         #expect(forward == Array(backward.reversed()))
     }
 
-    /// Resolving every environment in one pass has to produce exactly what building
-    /// the table and then asking it per command produces -- that equivalence is the
-    /// whole licence for `factor` to exist, since it is only there to avoid the
-    /// per-command lookup.
+    /// ``EnvironmentBaseTable/encodings``, which answers from what registration
+    /// already worked out, has to produce exactly what asking the table per
+    /// environment produces -- that equivalence is its whole licence to exist, since
+    /// it is only there to avoid the per-command lookup.
     ///
     /// Arguments cover what the registration fast path (which compares an
     /// environment's keys against the previously registered ones in place, rather
@@ -213,21 +213,19 @@ fileprivate struct EnvironmentBaseTableTests {
         ]
         let environments = shape.map { catalog[$0] }
 
-        let factoring = EnvironmentBaseTable.factor(environments: environments)
         let table = EnvironmentBaseTable(environments: environments)
+        let encodings = table.encodings
 
-        #expect(factoring.encodings == environments.map { table.encoding(for: $0) })
-        #expect(factoring.declaredBases.map { base in "\(base.name): \(base.bindings.map { "\($0.0)=\($0.1)" })" }
-                == table.declaredBases.map { base in "\(base.name): \(base.bindings.map { "\($0.0)=\($0.1)" })" })
+        #expect(encodings == environments.map { table.encoding(for: $0) })
 
-        // The factoring has to be usable, not merely self-consistent: every command's
+        // The encodings have to be usable, not merely self-consistent: every command's
         // effective environment must still be what it started with.
-        for (environment, encoding) in zip(environments, factoring.encodings) {
+        for (environment, encoding) in zip(environments, encodings) {
             switch encoding {
             case .inline:
                 break
             case .useBase(let name, let overrides):
-                let base = try? #require(factoring.declaredBases.first { $0.name == name }).bindings
+                let base = try? #require(table.declaredBases.first { $0.name == name }).bindings
                 #expect(effectiveEnvironment(base: base ?? [], overrides: overrides).map { "\($0.0)=\($0.1)" }
                         == environment.map { "\($0.0)=\($0.1)" })
             }

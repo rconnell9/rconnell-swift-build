@@ -1189,20 +1189,19 @@ extension BuildDescription {
         let sortedTasks = tasks.sorted{ $0.identifier < $1.identifier }
 
         // Factor the commands' environments, so variables many commands share are
-        // declared once rather than repeated per command.
-        //
-        // Resolved here, in one pass, rather than asked of the table per command
-        // while emitting: that question has to find an environment's base by its
-        // list of variable names, which means building and hashing that list. A
-        // large build's environments run to over a thousand variables each, so
-        // paying it per command dominates the cost of factoring in the first place.
-        let environmentsToFactor = sortedTasks.compactMap { task in
+        // declared once rather than repeated per command, and resolve each command's
+        // encoding now rather than while emitting. Asking the table per command would
+        // mean finding an environment's base by its list of variable names, which
+        // means building and hashing that list; a large build's environments run to a
+        // thousand variables each, so paying that per command costs about as much
+        // again as factoring in the first place.
+        let tasksWithEnvironments = sortedTasks.compactMap { task in
             ((task as? ConstructedTask)?.environmentToDescribe?.bindings).map { (Ref(task), $0) }
         }
-        let environmentFactoring = EnvironmentBaseTable.factor(environments: environmentsToFactor.lazy.map { $0.1 })
+        let environmentTable = EnvironmentBaseTable(environments: tasksWithEnvironments.lazy.map { $0.1 })
         // Uniquing is immaterial: a repeated task is the same object, so it has the
         // same environment and resolves to the same encoding.
-        let environmentEncodings = Dictionary(zip(environmentsToFactor.lazy.map { $0.0 }, environmentFactoring.encodings), uniquingKeysWith: { first, _ in first })
+        let environmentEncodings = Dictionary(zip(tasksWithEnvironments.lazy.map { $0.0 }, environmentTable.encodings), uniquingKeysWith: { first, _ in first })
 
         let messageShortening = userPreferences.activityTextShorteningLevel
 
@@ -1493,7 +1492,7 @@ extension BuildDescription {
             targetDependencies: targetDependencies,
             definingTargetsByModuleName: definingTargetsByModuleName,
             dependencyGraphDiagnostic: dependencyGraphDiagnostic,
-            environmentBases: environmentFactoring.declaredBases,
+            environmentBases: environmentTable.declaredBases,
             environmentEncodings: environmentEncodings,
             workspace: workspace
         )

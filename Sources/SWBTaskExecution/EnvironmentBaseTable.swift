@@ -61,12 +61,20 @@ package struct EnvironmentBaseTable: Sendable {
     /// environments.
     private var lastRegistered: (keys: [String], index: Int)?
 
+    /// Each environment the table was built over, with the candidate it shares its
+    /// keys with, in the order they were given.
+    ///
+    /// Kept so ``encodings`` need not look an environment up again. The bindings are
+    /// not copied -- the entry holds the same array the caller passed -- so this
+    /// costs one reference per command.
+    private var registered: [(bindings: [(String, String)], candidate: Int?)] = []
+
     package init() {}
 
     /// Build a table over all of a build's environments.
     package init(environments: some Sequence<[(String, String)]>) {
         for bindings in environments {
-            _ = register(bindings)
+            registered.append((bindings, register(bindings)))
         }
         nameSharedBases()
     }
@@ -76,11 +84,33 @@ package struct EnvironmentBaseTable: Sendable {
         candidates.lazy.compactMap { candidate in candidate.name.map { ($0, candidate.bindings) } }
     }
 
+    /// How each environment the table was built over should be sent, in the order
+    /// they were given.
+    ///
+    /// Answered from what registration already worked out. The alternative,
+    /// ``encoding(for:)`` per command, has to find an environment's candidate by its
+    /// list of variable names, and building and hashing that list for a
+    /// thousand-variable environment -- once per command -- costs about as much again
+    /// as building the whole table.
+    ///
+    /// Callers need not agree on how they factor the same build. llbuild hashes a
+    /// command's *effective* environment rather than the base and overrides it was
+    /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
+    /// into a base, or declining to, cannot change a command's signature.
+    package var encodings: [EnvironmentEncoding] {
+        registered.map { entry in
+            guard let candidate = entry.candidate, let name = candidates[candidate].name else {
+                return .inline
+            }
+            return .useBase(base: name, overrides: computeOverrides(in: entry.bindings, relativeTo: candidates[candidate].bindings))
+        }
+    }
+
     /// How one environment should be sent, given a table already built over it.
     ///
-    /// Use ``factor(environments:)`` to encode a whole build's environments; this
-    /// form has to find the environment's candidate by its keys, which is the cost
-    /// that factoring exists to avoid paying per command.
+    /// Use ``encodings`` to encode a whole build's environments; this form has to
+    /// find the environment's candidate by its keys, which is the cost ``encodings``
+    /// exists to avoid paying per command.
     package func encoding(for bindings: [(String, String)]) -> EnvironmentEncoding {
         guard let candidate = candidate(forKeysOf: bindings), let name = candidate.name else {
             return .inline
@@ -136,51 +166,5 @@ package struct EnvironmentBaseTable: Sendable {
             overrides.append(bindings[index])
         }
         return overrides
-    }
-}
-
-/// The product of factoring a build's environments: the bases to declare, and how
-/// each command should send its own environment.
-package struct EnvironmentFactoring: Sendable {
-    /// The bases to declare before any command references one, in the order they
-    /// were first needed.
-    package let declaredBases: [(name: String, bindings: [(String, String)])]
-
-    /// How each command should send its environment, in the order the environments
-    /// were given.
-    package let encodings: [EnvironmentEncoding]
-}
-
-extension EnvironmentBaseTable {
-    /// Factor a build's environments, resolving how each command sends its own in
-    /// the same pass that builds the table.
-    ///
-    /// Preferred over ``init(environments:)`` plus ``encoding(for:)`` per command.
-    /// Resolving an encoding on its own has to find the environment's candidate by
-    /// its keys, and that lookup builds and hashes a list of every variable name in
-    /// the environment; doing it a second time per command costs more than
-    /// everything else building the table does. Here each environment's candidate is
-    /// simply remembered from when it was registered.
-    ///
-    /// Callers need not agree on how they factor the same build. llbuild hashes a
-    /// command's *effective* environment rather than the base and overrides it was
-    /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
-    /// into a base, or declining to, cannot change a command's signature.
-    package static func factor(environments: some Collection<[(String, String)]>) -> EnvironmentFactoring {
-        var table = EnvironmentBaseTable()
-        var candidateIndices: [Int?] = []
-        candidateIndices.reserveCapacity(environments.count)
-        for bindings in environments {
-            candidateIndices.append(table.register(bindings))
-        }
-        table.nameSharedBases()
-
-        let encodings = zip(environments, candidateIndices).map { bindings, candidateIndex -> EnvironmentEncoding in
-            guard let candidateIndex, let name = table.candidates[candidateIndex].name else {
-                return .inline
-            }
-            return .useBase(base: name, overrides: table.computeOverrides(in: bindings, relativeTo: table.candidates[candidateIndex].bindings))
-        }
-        return EnvironmentFactoring(declaredBases: table.declaredBases, encodings: encodings)
     }
 }
