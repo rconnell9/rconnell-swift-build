@@ -40,13 +40,16 @@ package enum EnvironmentEncoding: Equatable {
 package struct EnvironmentBaseTable: Sendable {
 
     private struct Candidate: Sendable {
-        let bindings: [(String, String)]
+        let variables: [(String, String)]
         var declaredIndex: Int?
         let unshareable: Bool
 
-        /// The commands whose environments share these keys, including the one the
-        /// candidate was created for.
-        var members: [(task: TaskIdentifier, bindings: [(String, String)])]
+        /// The commands whose environments share these keys, and the positions at
+        /// which each one's values differ from `variables`.
+        ///
+        /// Worked out as commands are registered, while the candidate they matched is
+        /// already in hand.
+        var members: [(task: TaskIdentifier, positions: [Int])]
     }
 
     private static let minimumCommandsToShareABase = 2
@@ -71,17 +74,10 @@ package struct EnvironmentBaseTable: Sendable {
 
     package init() {}
 
-    /// Build a table over all of a build's environments, named by the command each
-    /// belongs to.
-    ///
-    /// The commands are named so that a base can be found by command rather than by
-    /// environment. Finding one by environment costs a list of that environment's
-    /// variable names and a hash of it, and a large build has one
-    /// thousand-variable environment per command, so paying that per command costs
-    /// about as much again as building the whole table.
-    package init(environments: some Sequence<(task: TaskIdentifier, bindings: [(String, String)])>) {
-        for (task, bindings) in environments {
-            register(task, bindings)
+    /// Build a table over all of a build's environments.
+    package init(environments: some Sequence<(task: TaskIdentifier, environment: EnvironmentBindings)>) {
+        for (task, environment) in environments {
+            register(task, environment.bindings)
         }
 
         // Which key lists are shared by enough commands to be worth declaring is not
@@ -91,27 +87,28 @@ package struct EnvironmentBaseTable: Sendable {
         for candidate in candidates {
             guard let index = candidate.declaredIndex else { continue }
             for member in candidate.members {
-                baseReferenceByTask[member.task] = (index, differingPositions(in: member.bindings, relativeTo: candidate.bindings))
+                baseReferenceByTask[member.task] = (index, member.positions)
             }
         }
     }
 
     /// The bases to declare, in the order they were first needed.
-    package var declaredBases: [(name: String, bindings: [(String, String)])] {
-        candidates.lazy.compactMap { candidate in candidate.declaredIndex.map { (Self.name(ofBase: $0), candidate.bindings) } }
+    package var declaredBases: [(name: String, variables: [(String, String)])] {
+        candidates.lazy.compactMap { candidate in candidate.declaredIndex.map { (Self.name(ofBase: $0), candidate.variables) } }
     }
 
     /// How this command's environment should be sent.
     ///
     /// Callers need not agree on how they factor the same build. llbuild hashes a
     /// command's *effective* environment rather than the base and overrides it was
-    /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
+    /// given separately -- see `ShellCommand::getSignature` -- so moving variables
     /// into a base, or declining to, cannot change a command's signature.
-    package func encoding(for task: TaskIdentifier, bindings: [(String, String)]) -> EnvironmentEncoding {
+    package func encoding(for task: TaskIdentifier, environment: EnvironmentBindings) -> EnvironmentEncoding {
         guard let reference = baseReference(for: task) else {
             return .inline
         }
-        return .useBase(base: Self.name(ofBase: reference.index), overrides: reference.positions.map { bindings[$0] })
+        let variables = environment.bindings
+        return .useBase(base: Self.name(ofBase: reference.index), overrides: reference.positions.map { variables[$0] })
     }
 
     /// The base for this command's environment, by its position in
@@ -132,27 +129,34 @@ package struct EnvironmentBaseTable: Sendable {
     /// with, creating that candidate if it is the first with those keys.
     ///
     /// An empty environment is dropped -- it gets no base.
-    private mutating func register(_ task: TaskIdentifier, _ bindings: [(String, String)]) {
-        guard !bindings.isEmpty else { return }
+    private mutating func register(_ task: TaskIdentifier, _ variables: [(String, String)]) {
+        guard !variables.isEmpty else { return }
 
-        if let lastRegistered, lastRegistered.keys.count == bindings.count,
-           zip(lastRegistered.keys, bindings).allSatisfy({ $0 == $1.0 }) {
-            candidates[lastRegistered.index].members.append((task, bindings))
+        if let lastRegistered, lastRegistered.keys.count == variables.count,
+           zip(lastRegistered.keys, variables).allSatisfy({ $0 == $1.0 }) {
+            addMember(task, variables, to: lastRegistered.index)
             return
         }
 
-        let keys = bindings.map { $0.0 }
+        let keys = variables.map { $0.0 }
         let index: Int
         if let existing = candidateIndexByKeys[keys] {
-            candidates[existing].members.append((task, bindings))
+            addMember(task, variables, to: existing)
             index = existing
         } else {
+            // The first command with these keys is the one a base would be declared
+            // with, so its own values are the base's and none of them differ.
             let unshareable = Set(keys).count != keys.count
-            candidates.append(Candidate(bindings: bindings, declaredIndex: nil, unshareable: unshareable, members: [(task, bindings)]))
+            candidates.append(Candidate(variables: variables, declaredIndex: nil, unshareable: unshareable, members: [(task, [])]))
             index = candidates.count - 1
             candidateIndexByKeys[keys] = index
         }
         lastRegistered = (keys, index)
+    }
+
+    private mutating func addMember(_ task: TaskIdentifier, _ variables: [(String, String)], to candidate: Int) {
+        let positions = differingPositions(in: variables, relativeTo: candidates[candidate].variables)
+        candidates[candidate].members.append((task, positions))
     }
 
     private mutating func nameSharedBases() {
@@ -163,7 +167,7 @@ package struct EnvironmentBaseTable: Sendable {
         }
     }
 
-    private func differingPositions(in bindings: [(String, String)], relativeTo base: [(String, String)]) -> [Int] {
-        bindings.indices.filter { bindings[$0].1 != base[$0].1 }
+    private func differingPositions(in variables: [(String, String)], relativeTo base: [(String, String)]) -> [Int] {
+        variables.indices.filter { variables[$0].1 != base[$0].1 }
     }
 }

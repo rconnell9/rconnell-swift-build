@@ -95,11 +95,11 @@ extension FrozenTaskStore: Serializable {
         // The store is written as [base keys, base values, tasks], so the environment bases are read before the tasks that refer to them.
         let tasks = Array(self.tasks.values)
         let delegate = serializer.delegate as? (any TaskEnvironmentSerializerDelegate)
-        let baseTable = delegate == nil ? EnvironmentBaseTable() : EnvironmentBaseTable(environments: tasks.lazy.map { ($0.identifier, $0.environment.bindings) })
+        let baseTable = delegate == nil ? EnvironmentBaseTable() : EnvironmentBaseTable(environments: tasks.lazy.map { ($0.identifier, $0.environment) })
         let bases = baseTable.declaredBases
         serializer.beginAggregate(3)
-        serializer.serialize(bases.map { $0.bindings.map(\.0) })
-        serializer.serialize(bases.map { $0.bindings.map(\.1) })
+        serializer.serialize(bases.map { $0.variables.map(\.0) })
+        serializer.serialize(bases.map { $0.variables.map(\.1) })
         delegate?.taskEnvironmentBaseTable = baseTable
         defer { delegate?.taskEnvironmentBaseTable = nil }
         serializer.serialize(tasks)
