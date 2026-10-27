@@ -60,7 +60,7 @@ package struct EnvironmentBaseTable: Sendable {
     /// order, which groups them by target, and commands within a target nearly
     /// always share a key list, so this hits for most of a large build's
     /// environments.
-    private var lastRegistered: (keys: [String], index: Int)?
+    private var lastRegistered: Int?
 
     /// The base each command's environment is sent against, for the commands that
     /// have one.
@@ -124,10 +124,10 @@ package struct EnvironmentBaseTable: Sendable {
     private mutating func register(_ bindings: [(String, String)]) -> Int? {
         guard !bindings.isEmpty else { return nil }
 
-        if let lastRegistered, lastRegistered.keys.count == bindings.count,
-           zip(lastRegistered.keys, bindings).allSatisfy({ $0 == $1.0 }) {
-            candidates[lastRegistered.index].references += 1
-            return lastRegistered.index
+        if let lastRegistered, candidates[lastRegistered].bindings.count == bindings.count,
+           zip(candidates[lastRegistered].bindings, bindings).allSatisfy({ $0.0 == $1.0 }) {
+            candidates[lastRegistered].references += 1
+            return lastRegistered
         }
 
         let keys = bindings.map { $0.0 }
@@ -141,7 +141,7 @@ package struct EnvironmentBaseTable: Sendable {
             index = candidates.count - 1
             candidateIndexByKeys[keys] = index
         }
-        lastRegistered = (keys, index)
+        lastRegistered = index
         return index
     }
 
