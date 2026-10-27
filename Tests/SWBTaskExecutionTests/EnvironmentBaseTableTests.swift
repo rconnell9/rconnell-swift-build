@@ -124,8 +124,6 @@ fileprivate struct EnvironmentBaseTableTests {
         #expect(table.encoding(for: TaskIdentifier(rawValue: "thirteen-again"), environment: bindings(count: 13)) == .useBase(base: "env-base-1", overrides: []))
     }
 
-    /// A key list two commands apart still shares a base, so the registration memo
-    /// cannot be the only thing that recognizes a repeat.
     @Test
     func interleavedKeyListsStillShareBases() {
         let twelve = bindings()
@@ -220,8 +218,6 @@ fileprivate struct EnvironmentBaseTableTests {
         #expect(table.encoding(for: TaskIdentifier(rawValue: "second"), environment: environment) == .inline)
     }
 
-    /// An empty environment gets no base, and does not stop the commands around it
-    /// from sharing one.
     @Test
     func emptyEnvironmentIsSentInline() {
         let shared = bindings()
