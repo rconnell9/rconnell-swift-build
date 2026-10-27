@@ -18,13 +18,6 @@ import SWBTaskExecution
 @Suite
 fileprivate struct EnvironmentBaseTableTests {
 
-    /// A table over one command per environment, asked about by environment.
-    ///
-    /// The table is keyed by command, but what these tests are about is which
-    /// environments can share a base, so they name environments and let this find the
-    /// command that had one. An environment the table was not built over is asked
-    /// about under a command it never saw, which is what a real caller asking about
-    /// an unregistered command does.
     private struct Factoring {
         private let table: EnvironmentBaseTable
         private let commands: [(TaskIdentifier, [(String, String)])]
@@ -46,9 +39,6 @@ fileprivate struct EnvironmentBaseTableTests {
             table.baseReference(for: command(for: bindings))
         }
 
-        /// Compares the bindings in place rather than by ``EnvironmentBindings``
-        /// equality, which ignores their order -- and order is exactly what decides
-        /// whether two environments can share a base.
         private func command(for bindings: [(String, String)]) -> TaskIdentifier {
             commands.first { $0.1.elementsEqual(bindings, by: ==) }?.0 ?? TaskIdentifier(rawValue: "unregistered")
         }
