@@ -52,7 +52,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let declared = table.declaredBases
         #expect(declared.count == 1)
         #expect(declared.first?.name == "env-base-0")
-        #expect(declared.first?.variables.map { "\($0.0)=\($0.1)" } == shared.bindings.map { "\($0.0)=\($0.1)" })
+        #expect(declared.first?.bindings.map { "\($0.0)=\($0.1)" } == shared.bindings.map { "\($0.0)=\($0.1)" })
     }
 
     /// An environment identical to its base sends nothing at all
@@ -69,7 +69,7 @@ fileprivate struct EnvironmentBaseTableTests {
     }
 
     /// The point of the whole thing: a command differing in a few values sends those
-    /// variables instead of all twelve
+    /// bindings instead of all twelve
     @Test(arguments: [[0], [11], [3, 7], Array(0..<12)])
     func differingValuesAreSentAsOverrides(differing: [Int]) {
         let base = env()
@@ -247,7 +247,7 @@ fileprivate struct EnvironmentBaseTableTests {
             case .inline:
                 break
             case .useBase(let name, let overrides):
-                let base = try? #require(table.declaredBases.first { $0.name == name }).variables
+                let base = try? #require(table.declaredBases.first { $0.name == name }).bindings
                 #expect(effectiveEnvironment(base: base ?? [], overrides: overrides).map { "\($0.0)=\($0.1)" }
                         == environment.bindings.map { "\($0.0)=\($0.1)" })
             }

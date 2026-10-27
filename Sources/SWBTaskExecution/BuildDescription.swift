@@ -725,9 +725,9 @@ package final class BuildDescriptionBuilder {
 
         // The environment bases the commands above reference by name.
         var envBaseDefinitions: [String: ByteString] = [:]
-        for (name, variables) in environmentBases.declaredBases {
+        for (name, bindings) in environmentBases.declaredBases {
             let stream = OutputByteStream()
-            stream <<< Format.asJSON(variables)
+            stream <<< Format.asJSON(bindings)
             envBaseDefinitions[name] = stream.bytes
         }
 
