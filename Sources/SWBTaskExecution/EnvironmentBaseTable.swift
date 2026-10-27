@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+package import SWBCore
 import SWBUtil
 
 /// How a single command's environment should be handed to llbuild
@@ -61,22 +62,39 @@ package struct EnvironmentBaseTable: Sendable {
     /// environments.
     private var lastRegistered: (keys: [String], index: Int)?
 
-    /// Each environment the table was built over, with the candidate it shares its
-    /// keys with, in the order they were given.
+    /// The commands that are sent against a base, and what to send for them.
     ///
-    /// Kept so ``encodings`` need not look an environment up again. The bindings are
-    /// not copied -- the entry holds the same array the caller passed -- so this
-    /// costs one reference per command.
-    private var registered: [(bindings: [(String, String)], candidate: Int?)] = []
+    /// Commands absent from this are sent whole, which is why ``encoding(for:)``
+    /// needs no default of its own.
+    private var encodingByTask: [TaskIdentifier: EnvironmentEncoding] = [:]
 
     package init() {}
 
-    /// Build a table over all of a build's environments.
-    package init(environments: some Sequence<[(String, String)]>) {
-        for bindings in environments {
-            registered.append((bindings, register(bindings)))
+    /// Build a table over every command's environment, naming the bases worth
+    /// sharing and working out how each command's environment is sent.
+    ///
+    /// The encodings are settled here rather than when each command is emitted
+    /// because finding an environment's base means building and hashing its list of
+    /// variable names, and a large build has one thousand-variable environment per
+    /// command -- paying that per command costs about as much again as building the
+    /// whole table.
+    package init(environments: some Sequence<(task: TaskIdentifier, bindings: [(String, String)])>) {
+        // Which key lists are shared by enough commands to be worth declaring is not
+        // known until they have all been registered, so what registration matched is
+        // held onto and the encodings are finished in a second pass. The bindings are
+        // not copied -- these hold the same arrays the caller passed.
+        var registered: [(task: TaskIdentifier, bindings: [(String, String)], candidate: Int)] = []
+        for (task, bindings) in environments {
+            if let candidate = register(bindings) {
+                registered.append((task, bindings, candidate))
+            }
         }
         nameSharedBases()
+
+        for entry in registered {
+            guard let name = candidates[entry.candidate].name else { continue }
+            encodingByTask[entry.task] = .useBase(base: name, overrides: computeOverrides(in: entry.bindings, relativeTo: candidates[entry.candidate].bindings))
+        }
     }
 
     /// The bases to declare, in the order they were first needed.
@@ -84,38 +102,15 @@ package struct EnvironmentBaseTable: Sendable {
         candidates.lazy.compactMap { candidate in candidate.name.map { ($0, candidate.bindings) } }
     }
 
-    /// How each environment the table was built over should be sent, in the order
-    /// they were given.
-    ///
-    /// Answered from what registration already worked out. The alternative,
-    /// ``encoding(for:)`` per command, has to find an environment's candidate by its
-    /// list of variable names, and building and hashing that list for a
-    /// thousand-variable environment -- once per command -- costs about as much again
-    /// as building the whole table.
+    /// How this command's environment should be sent: against one of
+    /// ``declaredBases``, or whole.
     ///
     /// Callers need not agree on how they factor the same build. llbuild hashes a
     /// command's *effective* environment rather than the base and overrides it was
     /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
     /// into a base, or declining to, cannot change a command's signature.
-    package var encodings: [EnvironmentEncoding] {
-        registered.map { entry in
-            guard let candidate = entry.candidate, let name = candidates[candidate].name else {
-                return .inline
-            }
-            return .useBase(base: name, overrides: computeOverrides(in: entry.bindings, relativeTo: candidates[candidate].bindings))
-        }
-    }
-
-    /// How one environment should be sent, given a table already built over it.
-    ///
-    /// Use ``encodings`` to encode a whole build's environments; this form has to
-    /// find the environment's candidate by its keys, which is the cost ``encodings``
-    /// exists to avoid paying per command.
-    package func encoding(for bindings: [(String, String)]) -> EnvironmentEncoding {
-        guard let candidate = candidate(forKeysOf: bindings), let name = candidate.name else {
-            return .inline
-        }
-        return .useBase(base: name, overrides: computeOverrides(in: bindings, relativeTo: candidate.bindings))
+    package func encoding(for task: TaskIdentifier) -> EnvironmentEncoding {
+        encodingByTask[task] ?? .inline
     }
 
     /// Record one command's environment, returning the index of the candidate it
@@ -150,14 +145,6 @@ package struct EnvironmentBaseTable: Sendable {
             candidates[index].name = "env-base-\(declared)"
             declared += 1
         }
-    }
-
-    private func candidateIndex(forKeysOf bindings: [(String, String)]) -> Int? {
-        candidateIndexByKeys[bindings.map { $0.0 }]
-    }
-
-    private func candidate(forKeysOf bindings: [(String, String)]) -> Candidate? {
-        candidateIndex(forKeysOf: bindings).map { candidates[$0] }
     }
 
     private func computeOverrides(in bindings: [(String, String)], relativeTo base: [(String, String)]) -> [(String, String)] {

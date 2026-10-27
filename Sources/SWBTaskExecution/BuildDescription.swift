@@ -608,13 +608,6 @@ package final class BuildDescriptionBuilder {
     /// The shared environment bases the commands may reference.
     private let environmentBases: EnvironmentBaseTable
 
-    /// Which base, if any, each task's environment is sent against -- worked out
-    /// up front by ``EnvironmentBaseTable/encodings`` rather than while emitting.
-    ///
-    /// A map rather than a list because commands are emitted in parallel, and so
-    /// in no order a list could be indexed by.
-    private let environmentEncodings: [TaskIdentifier: EnvironmentEncoding]
-
     /// For processing Gate and Constructed Tasks in parallel.
     private let processTaskLock = SWBMutex(())
 
@@ -649,7 +642,6 @@ package final class BuildDescriptionBuilder {
         definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>],
         dependencyGraphDiagnostic: Diagnostic,
         environmentBases: EnvironmentBaseTable = EnvironmentBaseTable(),
-        environmentEncodings: [TaskIdentifier: EnvironmentEncoding] = [:],
         workspace: Workspace
     ) {
         self.path = path
@@ -676,7 +668,6 @@ package final class BuildDescriptionBuilder {
         self.definingTargetsByModuleName = definingTargetsByModuleName
         self.dependencyGraphDiagnostic = dependencyGraphDiagnostic
         self.environmentBases = environmentBases
-        self.environmentEncodings = environmentEncodings
         self.taskStore = TaskStore()
     }
 
@@ -1037,9 +1028,8 @@ package final class BuildDescriptionBuilder {
                 // This defaults to true, we'll omit to to save space
                 // $0["inherit-env"] = "true"
                 if let environment {
-                    // Worked out up front; see `environmentEncodings`. A task missing
-                    // from the map can always be sent whole.
-                    switch environmentEncodings[task.identifier] ?? .inline {
+                    // Worked out up front; see `EnvironmentBaseTable`.
+                    switch environmentBases.encoding(for: task.identifier) {
                     case .inline:
                         $0["env"] = environment.bindings
                     case .useBase(let base, let overrides):
@@ -1188,19 +1178,10 @@ extension BuildDescription {
         let sortedTasks = tasks.sorted{ $0.identifier < $1.identifier }
 
         // Factor the commands' environments, so variables many commands share are
-        // declared once rather than repeated per command, and work out each command's
-        // encoding here rather than while emitting. Asking the table per command would
-        // mean finding an environment's base by its list of variable names, which
-        // means building and hashing that list; a large build's environments run to a
-        // thousand variables each, so paying that per command costs about as much
-        // again as factoring in the first place.
-        let tasksWithEnvironments = sortedTasks.compactMap { task in
+        // declared once rather than repeated per command.
+        let environmentBases = EnvironmentBaseTable(environments: sortedTasks.lazy.compactMap { task in
             ((task as? ConstructedTask)?.environmentToDescribe?.bindings).map { (task.identifier, $0) }
-        }
-        let environmentTable = EnvironmentBaseTable(environments: tasksWithEnvironments.lazy.map { $0.1 })
-        // Identifiers are unique -- they key the commands in the manifest -- so the
-        // uniquing closure is never reached.
-        let environmentEncodings = Dictionary(zip(tasksWithEnvironments.lazy.map { $0.0 }, environmentTable.encodings), uniquingKeysWith: { first, _ in first })
+        })
 
         let messageShortening = userPreferences.activityTextShorteningLevel
 
@@ -1491,8 +1472,7 @@ extension BuildDescription {
             targetDependencies: targetDependencies,
             definingTargetsByModuleName: definingTargetsByModuleName,
             dependencyGraphDiagnostic: dependencyGraphDiagnostic,
-            environmentBases: environmentTable,
-            environmentEncodings: environmentEncodings,
+            environmentBases: environmentBases,
             workspace: workspace
         )
         for (target, diagnostics) in diagnostics {
