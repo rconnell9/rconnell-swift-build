@@ -43,7 +43,10 @@ package struct EnvironmentBaseTable: Sendable {
         let bindings: [(String, String)]
         var declaredIndex: Int?
         let unshareable: Bool
-        var references: Int
+
+        /// The commands whose environments share these keys, including the one the
+        /// candidate was created for.
+        var members: [(task: TaskIdentifier, bindings: [(String, String)])]
     }
 
     private static let minimumCommandsToShareABase = 2
@@ -77,21 +80,19 @@ package struct EnvironmentBaseTable: Sendable {
     /// thousand-variable environment per command, so paying that per command costs
     /// about as much again as building the whole table.
     package init(environments: some Sequence<(task: TaskIdentifier, bindings: [(String, String)])>) {
-        // Which key lists are shared by enough commands to be worth declaring is not
-        // known until they have all been registered, so what registration matched is
-        // held onto and the references are finished in a second pass. The bindings are
-        // not copied -- these hold the same arrays the caller passed.
-        var registered: [(task: TaskIdentifier, bindings: [(String, String)], candidate: Int)] = []
         for (task, bindings) in environments {
-            if let candidate = register(bindings) {
-                registered.append((task, bindings, candidate))
-            }
+            register(task, bindings)
         }
-        nameSharedBases()
 
-        for entry in registered {
-            guard let index = candidates[entry.candidate].declaredIndex else { continue }
-            baseReferenceByTask[entry.task] = (index, differingPositions(in: entry.bindings, relativeTo: candidates[entry.candidate].bindings))
+        // Which key lists are shared by enough commands to be worth declaring is not
+        // known until all of them have been registered, so the references are resolved
+        // in a second pass.
+        nameSharedBases()
+        for candidate in candidates {
+            guard let index = candidate.declaredIndex else { continue }
+            for member in candidate.members {
+                baseReferenceByTask[member.task] = (index, differingPositions(in: member.bindings, relativeTo: candidate.bindings))
+            }
         }
     }
 
@@ -127,35 +128,36 @@ package struct EnvironmentBaseTable: Sendable {
         "env-base-\(index)"
     }
 
-    /// Record one command's environment, returning the index of the candidate it
-    /// shares its keys with (`nil` for an empty environment, which gets no base).
-    private mutating func register(_ bindings: [(String, String)]) -> Int? {
-        guard !bindings.isEmpty else { return nil }
+    /// Record one command's environment against the candidate it shares its keys
+    /// with, creating that candidate if it is the first with those keys.
+    ///
+    /// An empty environment is dropped -- it gets no base.
+    private mutating func register(_ task: TaskIdentifier, _ bindings: [(String, String)]) {
+        guard !bindings.isEmpty else { return }
 
         if let lastRegistered, lastRegistered.keys.count == bindings.count,
            zip(lastRegistered.keys, bindings).allSatisfy({ $0 == $1.0 }) {
-            candidates[lastRegistered.index].references += 1
-            return lastRegistered.index
+            candidates[lastRegistered.index].members.append((task, bindings))
+            return
         }
 
         let keys = bindings.map { $0.0 }
         let index: Int
         if let existing = candidateIndexByKeys[keys] {
-            candidates[existing].references += 1
+            candidates[existing].members.append((task, bindings))
             index = existing
         } else {
             let unshareable = Set(keys).count != keys.count
-            candidates.append(Candidate(bindings: bindings, declaredIndex: nil, unshareable: unshareable, references: 1))
+            candidates.append(Candidate(bindings: bindings, declaredIndex: nil, unshareable: unshareable, members: [(task, bindings)]))
             index = candidates.count - 1
             candidateIndexByKeys[keys] = index
         }
         lastRegistered = (keys, index)
-        return index
     }
 
     private mutating func nameSharedBases() {
         var declared = 0
-        for index in candidates.indices where !candidates[index].unshareable && candidates[index].references >= Self.minimumCommandsToShareABase {
+        for index in candidates.indices where !candidates[index].unshareable && candidates[index].members.count >= Self.minimumCommandsToShareABase {
             candidates[index].declaredIndex = declared
             declared += 1
         }
