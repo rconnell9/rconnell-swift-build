@@ -39,6 +39,13 @@ package enum EnvironmentEncoding: Equatable {
 /// common are declared once rather than repeated
 package struct EnvironmentBaseTable: Sendable {
 
+    package struct BaseReference: Sendable {
+        /// The base's position in EnvironmentBaseTable#declaredBases.
+        package let index: Int
+        /// The positions at which the command's own value differs from the base's
+        package let positions: [Int]
+    }
+
     private struct Candidate: Sendable {
         let bindings: [(String, String)]
         var declaredIndex: Int?
@@ -52,19 +59,9 @@ package struct EnvironmentBaseTable: Sendable {
 
     private var candidateIndexByKeys: [[String]: Int] = [:]
 
-    /// The candidate the previous registration matched, consulted before
-    /// ``candidateIndexByKeys``.
-    ///
-    /// Worth a special case because a hit skips building the key list and hashing
-    /// it, comparing the names in place instead. Environments are registered in task
-    /// order, which groups them by target, and commands within a target nearly
-    /// always share a key list, so this hits for most of a large build's
-    /// environments.
     private var lastRegistered: Int?
 
-    /// The base each command's environment is sent against, for the commands that
-    /// have one.
-    private var baseReferenceByTask: [TaskIdentifier: (index: Int, positions: [Int])] = [:]
+    private var baseReferenceByTask: [TaskIdentifier: BaseReference] = [:]
 
     package init() {}
 
@@ -82,7 +79,7 @@ package struct EnvironmentBaseTable: Sendable {
 
         for entry in registered {
             guard let index = candidates[entry.candidate].declaredIndex else { continue }
-            baseReferenceByTask[entry.task] = (index, entry.positions)
+            baseReferenceByTask[entry.task] = BaseReference(index: index, positions: entry.positions)
         }
     }
 
@@ -105,13 +102,11 @@ package struct EnvironmentBaseTable: Sendable {
         return .useBase(base: Self.name(ofBase: reference.index), overrides: reference.positions.map { bindings[$0] })
     }
 
-    /// The base for this command's environment, by its position in
-    /// ``declaredBases``, and the positions at which the command's environment has a
-    /// different value.
+    /// The base this command's environment is sent against.
     ///
     /// `nil` for a command that has no base, including one the table was not built
     /// over -- whose environment is then sent whole rather than mis-encoded.
-    package func baseReference(for task: TaskIdentifier) -> (index: Int, positions: [Int])? {
+    package func baseReference(for task: TaskIdentifier) -> BaseReference? {
         baseReferenceByTask[task]
     }
 

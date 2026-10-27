@@ -35,7 +35,7 @@ fileprivate struct EnvironmentBaseTableTests {
             table.encoding(for: command(for: bindings), environment: EnvironmentBindings(bindings))
         }
 
-        func baseReference(for bindings: [(String, String)]) -> (index: Int, positions: [Int])? {
+        func baseReference(for bindings: [(String, String)]) -> EnvironmentBaseTable.BaseReference? {
             table.baseReference(for: command(for: bindings))
         }
 
