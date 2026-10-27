@@ -606,10 +606,10 @@ package final class BuildDescriptionBuilder {
     private let settingsPerTarget: [ConfiguredTarget: Settings]
 
     /// The shared environment bases the commands may reference.
-    private let environmentBases: [(name: String, bindings: [(String, String)])]
+    private let environmentBases: EnvironmentBaseTable
 
     /// How each task's environment is sent, resolved up front by
-    /// ``EnvironmentBaseTable/factor(environments:)``.
+    /// ``EnvironmentBaseTable/encodings``.
     ///
     /// Keyed by task because commands are generated in parallel and in no
     /// particular order, and because the alternative -- asking the table for an
@@ -649,7 +649,7 @@ package final class BuildDescriptionBuilder {
         targetDependencies: [TargetDependencyRelationship],
         definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>],
         dependencyGraphDiagnostic: Diagnostic,
-        environmentBases: [(name: String, bindings: [(String, String)])] = [],
+        environmentBases: EnvironmentBaseTable = EnvironmentBaseTable(),
         environmentEncodings: [Ref<any PlannedTask>: EnvironmentEncoding] = [:],
         workspace: Workspace
     ) {
@@ -735,7 +735,7 @@ package final class BuildDescriptionBuilder {
 
         // The environment bases the commands above reference by name.
         var envBaseDefinitions: [String: ByteString] = [:]
-        for (name, bindings) in environmentBases {
+        for (name, bindings) in environmentBases.declaredBases {
             let stream = OutputByteStream()
             stream <<< Format.asJSON(bindings)
             envBaseDefinitions[name] = stream.bytes
@@ -1492,7 +1492,7 @@ extension BuildDescription {
             targetDependencies: targetDependencies,
             definingTargetsByModuleName: definingTargetsByModuleName,
             dependencyGraphDiagnostic: dependencyGraphDiagnostic,
-            environmentBases: environmentTable.declaredBases,
+            environmentBases: environmentTable,
             environmentEncodings: environmentEncodings,
             workspace: workspace
         )
