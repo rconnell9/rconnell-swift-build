@@ -233,8 +233,6 @@ fileprivate struct EnvironmentBaseTableTests {
         #expect(table.encoding(for: TaskIdentifier(rawValue: "shared-again"), environment: shared) == .useBase(base: "env-base-0", overrides: []))
     }
 
-    /// A command the table was not built over -- one that reaches llbuild without
-    /// having been registered -- is sent whole rather than mis-encoded.
     @Test
     func unregisteredCommandIsSentInline() {
         let table = EnvironmentBaseTable(environments: [
