@@ -155,13 +155,17 @@ fileprivate struct EnvironmentBaseTableTests {
         let once = bindings(count: 5)
         let alsoShared = bindings(count: 13)
         let differing = bindings(["VAR_2": "mine", "VAR_9": "also mine"], count: 13)
-        let table = EnvironmentBaseTable(environments: [bindings(), bindings(), once, alsoShared, differing])
+        let table = EnvironmentBaseTable(environments: [
+            (command("shared"), bindings()), (command("shared-again"), bindings()),
+            (command("once"), once),
+            (command("also-shared"), alsoShared), (command("differing"), differing),
+        ])
 
-        #expect(table.baseReference(for: once) == nil)
-        #expect(table.baseReference(for: bindings())?.index == 0)
-        #expect(table.baseReference(for: bindings())?.positions == [])
+        #expect(table.baseReference(for: command("once")) == nil)
+        #expect(table.baseReference(for: command("shared"))?.index == 0)
+        #expect(table.baseReference(for: command("shared"))?.positions == [])
 
-        let reference = try #require(table.baseReference(for: differing))
+        let reference = try #require(table.baseReference(for: command("differing")))
         #expect(reference.index == 1)
         #expect(table.declaredBases[reference.index].name == "env-base-1")
         #expect(reference.positions == [2, 9])
