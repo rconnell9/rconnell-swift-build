@@ -41,7 +41,7 @@ package struct EnvironmentBaseTable: Sendable {
 
     private struct Candidate: Sendable {
         let bindings: [(String, String)]
-        var name: String?
+        var declaredIndex: Int?
         let unshareable: Bool
         var references: Int
     }
@@ -62,26 +62,34 @@ package struct EnvironmentBaseTable: Sendable {
     /// environments.
     private var lastRegistered: (keys: [String], index: Int)?
 
-    /// The commands that are sent against a base, and what to send for them.
+    /// The base each command's environment is sent against, for the commands that
+    /// have one.
     ///
-    /// Commands absent from this are sent whole, which is why ``encoding(for:)``
-    /// needs no default of its own.
-    private var encodingByTask: [TaskIdentifier: EnvironmentEncoding] = [:]
+    /// Only filled in by ``init(environments:)-(some Sequence<(task:bindings:)>)``,
+    /// since only a caller that names its commands can be answered by command.
+    private var baseReferenceByTask: [TaskIdentifier: (index: Int, positions: [Int])] = [:]
 
     package init() {}
 
-    /// Build a table over every command's environment, naming the bases worth
-    /// sharing and working out how each command's environment is sent.
+    /// Build a table over all of a build's environments.
+    package init(environments: some Sequence<[(String, String)]>) {
+        for bindings in environments {
+            _ = register(bindings)
+        }
+        nameSharedBases()
+    }
+
+    /// Build a table over all of a build's environments, naming the command each
+    /// belongs to so that ``encoding(for:bindings:)`` can answer by command.
     ///
-    /// The encodings are settled here rather than when each command is emitted
-    /// because finding an environment's base means building and hashing its list of
-    /// variable names, and a large build has one thousand-variable environment per
-    /// command -- paying that per command costs about as much again as building the
-    /// whole table.
+    /// Worth naming them when there are many: finding a command's base by its
+    /// environment costs a list of that environment's variable names and a hash of
+    /// it, and a large build has one thousand-variable environment per command, so
+    /// paying that per command costs about as much again as building the table.
     package init(environments: some Sequence<(task: TaskIdentifier, bindings: [(String, String)])>) {
         // Which key lists are shared by enough commands to be worth declaring is not
         // known until they have all been registered, so what registration matched is
-        // held onto and the encodings are finished in a second pass. The bindings are
+        // held onto and the references are finished in a second pass. The bindings are
         // not copied -- these hold the same arrays the caller passed.
         var registered: [(task: TaskIdentifier, bindings: [(String, String)], candidate: Int)] = []
         for (task, bindings) in environments {
@@ -92,25 +100,50 @@ package struct EnvironmentBaseTable: Sendable {
         nameSharedBases()
 
         for entry in registered {
-            guard let name = candidates[entry.candidate].name else { continue }
-            encodingByTask[entry.task] = .useBase(base: name, overrides: computeOverrides(in: entry.bindings, relativeTo: candidates[entry.candidate].bindings))
+            guard let index = candidates[entry.candidate].declaredIndex else { continue }
+            baseReferenceByTask[entry.task] = (index, differingPositions(in: entry.bindings, relativeTo: candidates[entry.candidate].bindings))
         }
     }
 
     /// The bases to declare, in the order they were first needed.
     package var declaredBases: [(name: String, bindings: [(String, String)])] {
-        candidates.lazy.compactMap { candidate in candidate.name.map { ($0, candidate.bindings) } }
+        candidates.lazy.compactMap { candidate in candidate.declaredIndex.map { (Self.name(ofBase: $0), candidate.bindings) } }
     }
 
-    /// How this command's environment should be sent: against one of
-    /// ``declaredBases``, or whole.
+    package func encoding(for bindings: [(String, String)]) -> EnvironmentEncoding {
+        guard let reference = baseReference(for: bindings) else {
+            return .inline
+        }
+        return .useBase(base: Self.name(ofBase: reference.index), overrides: reference.positions.map { bindings[$0] })
+    }
+
+    /// How this command's environment should be sent, given the table was built
+    /// over the command by name.
+    ///
+    /// Answered from what building the table already worked out, which is the point
+    /// of naming the commands; see ``init(environments:)-(some Sequence<(task:bindings:)>)``.
     ///
     /// Callers need not agree on how they factor the same build. llbuild hashes a
     /// command's *effective* environment rather than the base and overrides it was
     /// given separately -- see `ShellCommand::getSignature` -- so moving bindings
     /// into a base, or declining to, cannot change a command's signature.
-    package func encoding(for task: TaskIdentifier) -> EnvironmentEncoding {
-        encodingByTask[task] ?? .inline
+    package func encoding(for task: TaskIdentifier, bindings: [(String, String)]) -> EnvironmentEncoding {
+        guard let reference = baseReferenceByTask[task] else {
+            return .inline
+        }
+        return .useBase(base: Self.name(ofBase: reference.index), overrides: reference.positions.map { bindings[$0] })
+    }
+
+    /// The base for `bindings`, by its position in `declaredBases`, and the positions at which `bindings` has a different value.
+    package func baseReference(for bindings: [(String, String)]) -> (index: Int, positions: [Int])? {
+        guard let candidate = candidate(forKeysOf: bindings), let index = candidate.declaredIndex else {
+            return nil
+        }
+        return (index, differingPositions(in: bindings, relativeTo: candidate.bindings))
+    }
+
+    private static func name(ofBase index: Int) -> String {
+        "env-base-\(index)"
     }
 
     /// Record one command's environment, returning the index of the candidate it
@@ -131,7 +164,7 @@ package struct EnvironmentBaseTable: Sendable {
             index = existing
         } else {
             let unshareable = Set(keys).count != keys.count
-            candidates.append(Candidate(bindings: bindings, name: nil, unshareable: unshareable, references: 1))
+            candidates.append(Candidate(bindings: bindings, declaredIndex: nil, unshareable: unshareable, references: 1))
             index = candidates.count - 1
             candidateIndexByKeys[keys] = index
         }
@@ -142,16 +175,20 @@ package struct EnvironmentBaseTable: Sendable {
     private mutating func nameSharedBases() {
         var declared = 0
         for index in candidates.indices where !candidates[index].unshareable && candidates[index].references >= Self.minimumCommandsToShareABase {
-            candidates[index].name = "env-base-\(declared)"
+            candidates[index].declaredIndex = declared
             declared += 1
         }
     }
 
-    private func computeOverrides(in bindings: [(String, String)], relativeTo base: [(String, String)]) -> [(String, String)] {
-        var overrides: [(String, String)] = []
-        for index in bindings.indices where bindings[index].1 != base[index].1 {
-            overrides.append(bindings[index])
-        }
-        return overrides
+    private func candidateIndex(forKeysOf bindings: [(String, String)]) -> Int? {
+        candidateIndexByKeys[bindings.map { $0.0 }]
+    }
+
+    private func candidate(forKeysOf bindings: [(String, String)]) -> Candidate? {
+        candidateIndex(forKeysOf: bindings).map { candidates[$0] }
+    }
+
+    private func differingPositions(in bindings: [(String, String)], relativeTo base: [(String, String)]) -> [Int] {
+        bindings.indices.filter { bindings[$0].1 != base[$0].1 }
     }
 }

@@ -60,7 +60,7 @@ fileprivate struct EnvironmentBaseTableTests {
     func identicalEnvironmentSendsNoOverrides() {
         let table = EnvironmentBaseTable(environments: [(command("first"), bindings()), (command("second"), bindings())])
 
-        guard case .useBase(let base, let overrides) = table.encoding(for: command("second")) else {
+        guard case .useBase(let base, let overrides) = table.encoding(for: command("second"), bindings: bindings()) else {
             Issue.record("expected an identical environment to reuse the base")
             return
         }
@@ -76,7 +76,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let environment = bindings(Dictionary(uniqueKeysWithValues: differing.map { ("VAR_\($0)", "mine-\($0)") }))
         let table = EnvironmentBaseTable(environments: [(command("first"), baseEnvironment), (command("second"), environment)])
 
-        guard case .useBase(_, let overrides) = table.encoding(for: command("second")) else {
+        guard case .useBase(_, let overrides) = table.encoding(for: command("second"), bindings: environment) else {
             Issue.record("expected the second environment to reuse the base")
             return
         }
@@ -98,8 +98,8 @@ fileprivate struct EnvironmentBaseTableTests {
         ])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.encoding(for: command("ordered-again")) == .useBase(base: "env-base-0", overrides: []))
-        #expect(table.encoding(for: command("reordered-again")) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: command("ordered-again"), bindings: environment) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: command("reordered-again"), bindings: reordered) == .useBase(base: "env-base-1", overrides: []))
     }
 
     /// A different key list gets its own base rather than inheriting one whose
@@ -112,7 +112,7 @@ fileprivate struct EnvironmentBaseTableTests {
         ])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.encoding(for: command("thirteen-again")) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: command("thirteen-again"), bindings: bindings(count: 13)) == .useBase(base: "env-base-1", overrides: []))
     }
 
     @Test
@@ -120,8 +120,8 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [(command("twelve"), bindings()), (command("four-hundred"), bindings(count: 400))])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.encoding(for: command("twelve")) == .inline)
-        #expect(table.encoding(for: command("four-hundred")) == .inline)
+        #expect(table.encoding(for: command("twelve"), bindings: bindings()) == .inline)
+        #expect(table.encoding(for: command("four-hundred"), bindings: bindings(count: 400)) == .inline)
     }
 
     @Test
@@ -130,7 +130,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [(command("first"), environment), (command("second"), environment)])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0"])
-        #expect(table.encoding(for: command("second")) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: command("second"), bindings: environment) == .useBase(base: "env-base-0", overrides: []))
     }
 
     @Test
@@ -145,9 +145,26 @@ fileprivate struct EnvironmentBaseTableTests {
         ])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.encoding(for: command("shared-again")) == .useBase(base: "env-base-0", overrides: []))
-        #expect(table.encoding(for: command("once")) == .inline)
-        #expect(table.encoding(for: command("also-shared-again")) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: command("shared-again"), bindings: shared) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: command("once"), bindings: once) == .inline)
+        #expect(table.encoding(for: command("also-shared-again"), bindings: alsoShared) == .useBase(base: "env-base-1", overrides: []))
+    }
+
+    @Test
+    func baseReferenceGivesTheBaseAndTheDifferingPositions() throws {
+        let once = bindings(count: 5)
+        let alsoShared = bindings(count: 13)
+        let differing = bindings(["VAR_2": "mine", "VAR_9": "also mine"], count: 13)
+        let table = EnvironmentBaseTable(environments: [bindings(), bindings(), once, alsoShared, differing])
+
+        #expect(table.baseReference(for: once) == nil)
+        #expect(table.baseReference(for: bindings())?.index == 0)
+        #expect(table.baseReference(for: bindings())?.positions == [])
+
+        let reference = try #require(table.baseReference(for: differing))
+        #expect(reference.index == 1)
+        #expect(table.declaredBases[reference.index].name == "env-base-1")
+        #expect(reference.positions == [2, 9])
     }
 
     @Test
@@ -156,7 +173,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [(command("first"), environment), (command("second"), environment)])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.encoding(for: command("second")) == .inline)
+        #expect(table.encoding(for: command("second"), bindings: environment) == .inline)
     }
 
     @Test
@@ -164,7 +181,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [(command("empty"), [])])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.encoding(for: command("empty")) == .inline)
+        #expect(table.encoding(for: command("empty"), bindings: []) == .inline)
     }
 
     /// A command the table was not built over -- one whose environment reaches
@@ -175,7 +192,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: [(command("first"), bindings()), (command("second"), bindings())])
 
         #expect(table.declaredBases.count == 1)
-        #expect(table.encoding(for: command("never-registered")) == .inline)
+        #expect(table.encoding(for: command("never-registered"), bindings: bindings(count: 20)) == .inline)
     }
 
     /// Whatever the table decides, every command's effective environment has to be
@@ -222,7 +239,7 @@ fileprivate struct EnvironmentBaseTableTests {
         let table = EnvironmentBaseTable(environments: commands)
 
         for (command, environment) in commands {
-            switch table.encoding(for: command) {
+            switch table.encoding(for: command, bindings: environment) {
             case .inline:
                 break
             case .useBase(let name, let overrides):
