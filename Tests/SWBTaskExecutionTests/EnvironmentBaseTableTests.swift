@@ -25,14 +25,8 @@ fileprivate struct EnvironmentBaseTableTests {
         }
     }
 
-    /// The identifier of the command whose environment was registered `index`th.
-    private func command(_ index: Int) -> TaskIdentifier {
-        TaskIdentifier(rawValue: "command-\(index)")
-    }
-
-    /// A table over a build whose commands have these environments, in this order.
-    private func table(over environments: [[(String, String)]]) -> EnvironmentBaseTable {
-        EnvironmentBaseTable(environments: environments.enumerated().map { (command($0.offset), $0.element) })
+    private func command(_ name: String) -> TaskIdentifier {
+        TaskIdentifier(rawValue: name)
     }
 
     /// llbuild's effective environment for a command encoded against a base
@@ -53,7 +47,7 @@ fileprivate struct EnvironmentBaseTableTests {
     @Test
     func firstEnvironmentDeclaresTheBase() {
         let environment = bindings()
-        let table = table(over: [environment, bindings(["VAR_3": "mine"])])
+        let table = EnvironmentBaseTable(environments: [(command("first"), environment), (command("second"), bindings(["VAR_3": "mine"]))])
 
         let declared = table.declaredBases
         #expect(declared.count == 1)
@@ -64,9 +58,9 @@ fileprivate struct EnvironmentBaseTableTests {
     /// An environment identical to its base sends nothing at all
     @Test
     func identicalEnvironmentSendsNoOverrides() {
-        let table = table(over: [bindings(), bindings()])
+        let table = EnvironmentBaseTable(environments: [(command("first"), bindings()), (command("second"), bindings())])
 
-        guard case .useBase(let base, let overrides) = table.encoding(for: command(1)) else {
+        guard case .useBase(let base, let overrides) = table.encoding(for: command("second")) else {
             Issue.record("expected an identical environment to reuse the base")
             return
         }
@@ -80,9 +74,9 @@ fileprivate struct EnvironmentBaseTableTests {
     func differingValuesAreSentAsOverrides(differing: [Int]) {
         let baseEnvironment = bindings()
         let environment = bindings(Dictionary(uniqueKeysWithValues: differing.map { ("VAR_\($0)", "mine-\($0)") }))
-        let table = table(over: [baseEnvironment, environment])
+        let table = EnvironmentBaseTable(environments: [(command("first"), baseEnvironment), (command("second"), environment)])
 
-        guard case .useBase(_, let overrides) = table.encoding(for: command(1)) else {
+        guard case .useBase(_, let overrides) = table.encoding(for: command("second")) else {
             Issue.record("expected the second environment to reuse the base")
             return
         }
@@ -98,39 +92,45 @@ fileprivate struct EnvironmentBaseTableTests {
     func reorderedKeysGetSeparateBases() {
         let environment = bindings()
         let reordered = Array(environment.reversed())
-        let table = table(over: [environment, environment, reordered, reordered])
+        let table = EnvironmentBaseTable(environments: [
+            (command("ordered"), environment), (command("ordered-again"), environment),
+            (command("reordered"), reordered), (command("reordered-again"), reordered),
+        ])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.encoding(for: command(1)) == .useBase(base: "env-base-0", overrides: []))
-        #expect(table.encoding(for: command(3)) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: command("ordered-again")) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: command("reordered-again")) == .useBase(base: "env-base-1", overrides: []))
     }
 
     /// A different key list gets its own base rather than inheriting one whose
     /// keys it would have to append to.
     @Test
     func differentKeysGetSeparateBases() {
-        let table = table(over: [bindings(), bindings(), bindings(count: 13), bindings(count: 13)])
+        let table = EnvironmentBaseTable(environments: [
+            (command("twelve"), bindings()), (command("twelve-again"), bindings()),
+            (command("thirteen"), bindings(count: 13)), (command("thirteen-again"), bindings(count: 13)),
+        ])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.encoding(for: command(3)) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: command("thirteen-again")) == .useBase(base: "env-base-1", overrides: []))
     }
 
     @Test
     func keyListUsedOnceIsSentInline() {
-        let table = table(over: [bindings(), bindings(count: 400)])
+        let table = EnvironmentBaseTable(environments: [(command("twelve"), bindings()), (command("four-hundred"), bindings(count: 400))])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.encoding(for: command(0)) == .inline)
-        #expect(table.encoding(for: command(1)) == .inline)
+        #expect(table.encoding(for: command("twelve")) == .inline)
+        #expect(table.encoding(for: command("four-hundred")) == .inline)
     }
 
     @Test
     func smallSharedEnvironmentGetsABase() {
         let environment = bindings(count: 1)
-        let table = table(over: [environment, environment])
+        let table = EnvironmentBaseTable(environments: [(command("first"), environment), (command("second"), environment)])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0"])
-        #expect(table.encoding(for: command(1)) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: command("second")) == .useBase(base: "env-base-0", overrides: []))
     }
 
     @Test
@@ -138,45 +138,49 @@ fileprivate struct EnvironmentBaseTableTests {
         let shared = bindings()
         let once = bindings(count: 5)
         let alsoShared = bindings(count: 13)
-        let table = table(over: [shared, shared, once, alsoShared, alsoShared])
+        let table = EnvironmentBaseTable(environments: [
+            (command("shared"), shared), (command("shared-again"), shared),
+            (command("once"), once),
+            (command("also-shared"), alsoShared), (command("also-shared-again"), alsoShared),
+        ])
 
         #expect(table.declaredBases.map { $0.name } == ["env-base-0", "env-base-1"])
-        #expect(table.encoding(for: command(1)) == .useBase(base: "env-base-0", overrides: []))
-        #expect(table.encoding(for: command(2)) == .inline)
-        #expect(table.encoding(for: command(4)) == .useBase(base: "env-base-1", overrides: []))
+        #expect(table.encoding(for: command("shared-again")) == .useBase(base: "env-base-0", overrides: []))
+        #expect(table.encoding(for: command("once")) == .inline)
+        #expect(table.encoding(for: command("also-shared-again")) == .useBase(base: "env-base-1", overrides: []))
     }
 
     @Test
     func duplicateKeysAreSentInline() {
         let environment = bindings() + [("VAR_0", "again")]
-        let table = table(over: [environment, environment])
+        let table = EnvironmentBaseTable(environments: [(command("first"), environment), (command("second"), environment)])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.encoding(for: command(1)) == .inline)
+        #expect(table.encoding(for: command("second")) == .inline)
     }
 
     @Test
     func emptyEnvironmentIsSentInline() {
-        let table = table(over: [[]])
+        let table = EnvironmentBaseTable(environments: [(command("empty"), [])])
 
         #expect(table.declaredBases.isEmpty)
-        #expect(table.encoding(for: command(0)) == .inline)
+        #expect(table.encoding(for: command("empty")) == .inline)
     }
 
-    /// A command the table was not built over -- one whose environment is handed to
+    /// A command the table was not built over -- one whose environment reaches
     /// llbuild without having been registered -- is sent whole rather than
     /// mis-encoded.
     @Test
     func unregisteredCommandIsSentInline() {
-        let table = table(over: [bindings(), bindings()])
+        let table = EnvironmentBaseTable(environments: [(command("first"), bindings()), (command("second"), bindings())])
 
         #expect(table.declaredBases.count == 1)
-        #expect(table.encoding(for: command(99)) == .inline)
+        #expect(table.encoding(for: command("never-registered")) == .inline)
     }
 
     /// Whatever the table decides, every command's effective environment has to be
-    /// the one it started with -- that is the only thing the factoring is not
-    /// allowed to change.
+    /// the one it started with -- that is the one thing the factoring is not allowed
+    /// to change.
     ///
     /// Arguments cover what the registration fast path (which compares an
     /// environment's keys against the previously registered ones in place, rather
@@ -203,7 +207,7 @@ fileprivate struct EnvironmentBaseTableTests {
     ] as [[Int]])
     func factoringPreservesEveryEnvironment(shape: [Int]) {
         // Each element of `shape` selects one of the environments below, so a shape
-        // is a sequence of environments in registration order.
+        // is a sequence of commands' environments in registration order.
         let catalog: [[(String, String)]] = [
             bindings(),                                 // 0: the shared 12-variable environment
             bindings(["VAR_3": "mine"]),                // 1: same keys, one value differing
@@ -214,11 +218,11 @@ fileprivate struct EnvironmentBaseTableTests {
             bindings() + [("VAR_0", "again")],          // 6: a duplicate key, so unshareable
             [],                                         // 7: empty
         ]
-        let environments = shape.map { catalog[$0] }
-        let table = table(over: environments)
+        let commands = shape.enumerated().map { (command("command-\($0.offset)"), catalog[$0.element]) }
+        let table = EnvironmentBaseTable(environments: commands)
 
-        for (index, environment) in environments.enumerated() {
-            switch table.encoding(for: command(index)) {
+        for (command, environment) in commands {
+            switch table.encoding(for: command) {
             case .inline:
                 break
             case .useBase(let name, let overrides):
